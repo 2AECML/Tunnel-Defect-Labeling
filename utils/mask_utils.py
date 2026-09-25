@@ -73,6 +73,60 @@ def blend_mask_on_image(
     return display_img
 
 
+def mask_to_overlay_rgba(
+    mask_img: np.ndarray,
+    classes: list,
+    alpha: float = 0.5,
+    show_all: bool = True,
+    current_class_idx: int = 0,
+    show_contour: bool = True,
+) -> np.ndarray | None:
+    """将单通道类别掩膜转为独立的 RGBA 显示图层。
+
+    返回 None 表示当前没有需要显示的掩膜像素。原图不参与
+    这一转换，因此绘制和切换掩膜显示不会重建原图图层。
+    """
+    if mask_img is None:
+        return None
+
+    selected = classes
+    if not show_all and 0 <= current_class_idx < len(classes):
+        selected = [classes[current_class_idx]]
+
+    counts = np.bincount(mask_img.reshape(-1), minlength=256)
+    visible_values = {
+        int(cls["value"])
+        for cls in selected
+        if 0 <= int(cls["value"]) <= 255 and counts[int(cls["value"])] > 0
+    }
+    if not visible_values:
+        return None
+
+    lookup = np.zeros((256, 4), dtype=np.uint8)
+    opacity = int(np.clip(round(alpha * 255), 0, 255))
+    for cls in selected:
+        value = int(cls["value"])
+        if value not in visible_values:
+            continue
+        b, g, r = cls["color"]
+        lookup[value] = (r, g, b, opacity)
+
+    overlay = lookup[mask_img]
+    if show_contour:
+        for cls in selected:
+            value = int(cls["value"])
+            if value not in visible_values:
+                continue
+            region = (mask_img == value).astype(np.uint8)
+            cnts, _ = cv2.findContours(
+                region, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            b, g, r = cls["color"]
+            bright = (min(255, r + 80), min(255, g + 80), min(255, b + 80), 255)
+            cv2.drawContours(overlay, cnts, -1, bright, 1)
+    return np.ascontiguousarray(overlay)
+
+
 def adjust_brightness_contrast(
     img: np.ndarray, brightness: int = 0, contrast: float = 1.0
 ) -> np.ndarray:
@@ -90,12 +144,14 @@ def class_pixel_stats_str(mask_img: np.ndarray, classes: list) -> str:
     """返回各类别像素统计的可读字符串，用于状态栏显示"""
     if mask_img is None:
         return ""
+    counts = np.bincount(mask_img.reshape(-1), minlength=256)
     parts = []
     for cls in classes:
-        cnt = int(np.sum(mask_img == cls["value"]))
+        value = int(cls["value"])
+        cnt = int(counts[value]) if 0 <= value < len(counts) else 0
         if cnt > 0:
             parts.append(f"[{cls['value']}]{cls['name']}: {cnt}px")
-    bg = int(np.sum(mask_img == 0))
+    bg = int(counts[0])
     if parts:
         return "  |  ".join(parts) + f"  背景: {bg}px"
     return "全背景"

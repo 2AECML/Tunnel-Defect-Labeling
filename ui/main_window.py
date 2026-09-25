@@ -19,7 +19,7 @@ from PyQt5.QtGui import QImage, QPixmap, QColor, QPalette, QFontMetrics, QFont, 
 from core import AnnotationState, DrawEngine, DrawTool, VALID_IMAGE_EXTS
 from utils import (imread_unicode, imwrite_unicode, scan_images,
                    find_mask_path, mask_save_path,
-                   blend_mask_on_image, adjust_brightness_contrast,
+                   mask_to_overlay_rgba, adjust_brightness_contrast,
                    class_pixel_stats_str)
 from ui.graphics_view import InteractiveGraphicsView
 from ui.edit_panel import EditPanel
@@ -393,38 +393,31 @@ class MainWindow(QMainWindow):
             if self.edit_panel:
                 self.edit_panel.hide()
             self.viewer.set_view_mode()
+            was_active = self.engine.is_active
             self.engine.cancel()
-            self._refresh_display()
+            self.viewer.clear_stroke()
+            if was_active and self.edit_panel:
+                self.edit_panel.set_undo_enabled(self.state.can_undo())
+            self._update_dirty_indicator()
 
     def _show_edit_panel(self):
         if self.edit_panel is None:
             self.edit_panel = EditPanel(self.state, self._theme_name, self)
             ep = self.edit_panel
-            ep.tool_changed.connect(lambda t: (
-                self.engine.cancel(),  # <--- 新增：切换工具时强制中断绘制状态
-                setattr(self.state, 'tool', t),
-                self.viewer.update_cursor_state(t, self.state.brush_size),
-                self._refresh_display()
-            ))
-
-            ep.brush_changed.connect(lambda v: (
-                self.engine.cancel(),  # <--- 新增：调整画笔大小时也中断一下最安全
-                setattr(self.state, 'brush_size', v),
-                self.viewer.update_cursor_state(self.state.tool, v),
-                self._refresh_display()
-            ))
+            ep.tool_changed.connect(self._on_tool_changed)
+            ep.brush_changed.connect(self._on_brush_changed)
             ep.class_changed.connect(self._on_ep_class)
-            ep.alpha_changed.connect(lambda _: self._refresh_display())
-            ep.contour_changed.connect(lambda _: self._refresh_display())
-            ep.show_all_changed.connect(lambda _: self._refresh_display())
-            ep.brightness_changed.connect(lambda _: self._refresh_display())
-            ep.contrast_changed.connect(lambda _: self._refresh_display())
+            ep.alpha_changed.connect(lambda _: self._refresh_mask_overlay())
+            ep.contour_changed.connect(lambda _: self._refresh_mask_overlay())
+            ep.show_all_changed.connect(lambda _: self._refresh_mask_overlay())
+            ep.brightness_changed.connect(lambda _: self._refresh_base_image())
+            ep.contrast_changed.connect(lambda _: self._refresh_base_image())
             ep.undo_requested.connect(self._undo)
             ep.save_requested.connect(self._save_mask)
             ep.close_edit_requested.connect(
                 lambda: (self.btn_edit.setChecked(False),
                          self._toggle_edit(False)))
-            ep.classes_updated.connect(lambda _: self._refresh_display())
+            ep.classes_updated.connect(lambda _: self._refresh_mask_overlay())
             ep.refresh_classes()
 
         # 面板放在主窗口右侧内部，固定偏移
@@ -440,39 +433,85 @@ class MainWindow(QMainWindow):
     # 视图事件
     # ──────────────────────────────────────────────────────────────────────────
     def _on_press(self, x, y):
+        mask = self.state.mask_img
+        if mask is None or not (0 <= x < mask.shape[1] and 0 <= y < mask.shape[0]):
+            return
         self.engine.on_press(x, y)
-        self._post_draw()
+        info = self.state.current_class_info
+        b, g, r = info["color"] if info else (255, 255, 255)
+        alpha = self.edit_panel.alpha_value() if self.edit_panel else 50
+        self.viewer.begin_stroke(
+            x, y, self.state.tool, QColor(r, g, b, max(80, int(alpha * 2.55))),
+            self.state.brush_size,
+        )
+        if self.edit_panel:
+            self.edit_panel.set_undo_enabled(self.state.can_undo())
+        self._update_dirty_indicator()
 
     def _on_move(self, x, y):
+        if not self.engine.is_active:
+            return
         self.engine.on_move(x, y)
-        self._post_draw()
+        self.viewer.extend_stroke(x, y)
 
     def _on_release(self, x, y):
+        if not self.engine.is_active:
+            return
         self.engine.on_release(x, y)
-        self._post_draw()
+        self.viewer.clear_stroke()
+        self._finish_stroke_update()
 
     def _on_dbl_click(self, x, y):
-        self.engine.on_double_click(x, y)
-        self._post_draw()
+        # 绘制以鼠标松开为结束，双击不触发额外整图更新。
+        pass
 
     def _on_hover(self, x, y):
         self._cursor_pos = (x, y)
-        if self.state.tool == DrawTool.LINE and self.engine.is_active:
-            self._refresh_display()
 
     def _on_ep_class(self, idx):
+        if self.engine.is_active:
+            self.engine.cancel()
+            self.viewer.clear_stroke()
+        changed = idx != self.state.current_class
         self.state.current_class = idx
-        self._refresh_display()
+        if changed or (self.edit_panel and not self.edit_panel.show_all_checked()):
+            self._refresh_mask_overlay()
+        self._update_dirty_indicator()
 
-    def _post_draw(self):
+    def _on_tool_changed(self, tool):
+        was_active = self.engine.is_active
+        self.engine.cancel()
+        self.viewer.clear_stroke()
+        self.state.tool = tool
+        self.viewer.update_cursor_state(tool, self.state.brush_size)
+        if was_active and self.edit_panel:
+            self.edit_panel.set_undo_enabled(self.state.can_undo())
+        self._update_dirty_indicator()
+
+    def _on_brush_changed(self, value):
+        was_active = self.engine.is_active
+        self.engine.cancel()
+        self.viewer.clear_stroke()
+        self.state.brush_size = value
+        self.viewer.update_cursor_state(self.state.tool, value)
+        if was_active and self.edit_panel:
+            self.edit_panel.set_undo_enabled(self.state.can_undo())
+        self._update_dirty_indicator()
+
+    def _refresh_stats(self):
         if self.edit_panel:
             self.edit_panel.set_undo_enabled(self.state.can_undo())
-            self.edit_panel.show_line_hint(
-                self.engine.is_active and self.state.tool == DrawTool.LINE)
             self.edit_panel.set_stats(
                 class_pixel_stats_str(self.state.mask_img, self.state.classes))
-        self._refresh_display()
+
+    def _finish_stroke_update(self):
+        self._refresh_mask_overlay()
+        self._refresh_stats()
         self._update_dirty_indicator()
+
+    # 保留方法名以兼容旧调用；它只用于一笔结束后的更新。
+    def _post_draw(self):
+        self._finish_stroke_update()
 
     def _update_dirty_indicator(self):
         if not self.image_files or self.current_index < 0:
@@ -520,7 +559,7 @@ class MainWindow(QMainWindow):
     # ──────────────────────────────────────────────────────────────────────────
     # 显示刷新
     # ──────────────────────────────────────────────────────────────────────────
-    def _refresh_display(self, reset_zoom=False, *args):
+    def _refresh_base_image(self, reset_zoom=False, *args):
         if self.state.orig_img is None:
             return
         ep = self.edit_panel
@@ -533,20 +572,6 @@ class MainWindow(QMainWindow):
             contrast=contrast / 100.0
         )
 
-        if self.state.mask_img is not None and self.state.is_mask_visible:
-            alpha    = ep.alpha_value() / 100.0 if ep and ep.isVisible() else 0.5
-            contour  = ep.contour_checked()     if ep and ep.isVisible() else True
-            show_all = ep.show_all_checked()    if ep and ep.isVisible() else True
-            img = blend_mask_on_image(
-                img, self.state.mask_img, self.state.classes,
-                alpha=alpha, show_all=show_all,
-                current_class_idx=self.state.current_class,
-                show_contour=contour
-            )
-
-        if self.state.tool == DrawTool.LINE and self.engine.is_active:
-            self.engine.draw_line_preview(img, self._cursor_pos)
-
         rgb  = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
         qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
@@ -558,12 +583,41 @@ class MainWindow(QMainWindow):
             self.viewer.update_image(px)
         self._update_dirty_indicator()
 
+    def _refresh_mask_overlay(self):
+        if self.state.mask_img is None:
+            self.viewer.set_overlay(QPixmap())
+            return
+        ep = self.edit_panel
+        alpha = ep.alpha_value() / 100.0 if ep else 0.5
+        contour = ep.contour_checked() if ep else True
+        show_all = ep.show_all_checked() if ep else True
+        rgba = mask_to_overlay_rgba(
+            self.state.mask_img,
+            self.state.classes,
+            alpha=alpha,
+            show_all=show_all,
+            current_class_idx=self.state.current_class,
+            show_contour=contour,
+        )
+        if rgba is None:
+            self.viewer.set_overlay(QPixmap())
+        else:
+            h, w, _ = rgba.shape
+            qimg = QImage(rgba.data, w, h, 4 * w, QImage.Format_RGBA8888)
+            self.viewer.set_overlay(QPixmap.fromImage(qimg))
+        self.viewer.set_overlay_visible(self.state.is_mask_visible)
+
+    def _refresh_display(self, reset_zoom=False, *args):
+        """完整刷新只在加载图像等低频场景使用。"""
+        self._refresh_base_image(reset_zoom=reset_zoom)
+        self._refresh_mask_overlay()
+
     # ──────────────────────────────────────────────────────────────────────────
     # 掩膜可见切换
     # ──────────────────────────────────────────────────────────────────────────
     def _toggle_mask_visible(self):
         self.state.is_mask_visible = self.btn_mask_vis.isChecked()
-        self._refresh_display()
+        self.viewer.set_overlay_visible(self.state.is_mask_visible)
 
     # ──────────────────────────────────────────────────────────────────────────
     # 撤销 / 折线
@@ -572,16 +626,23 @@ class MainWindow(QMainWindow):
         if self.state.pop_undo():
             if self.edit_panel:
                 self.edit_panel.set_undo_enabled(self.state.can_undo())
-            self._refresh_display()
+            self.viewer.clear_stroke()
+            self._refresh_mask_overlay()
+            self._refresh_stats()
+            self._update_dirty_indicator()
 
     def _commit_line(self):
         if self.engine.is_active and self._cursor_pos is not None:
             self.engine.on_release(*self._cursor_pos)
+        self.viewer.clear_stroke()
         self._post_draw()
 
     def _cancel_line(self):
         self.engine.cancel()
-        self._post_draw()
+        self.viewer.clear_stroke()
+        if self.edit_panel:
+            self.edit_panel.set_undo_enabled(self.state.can_undo())
+        self._update_dirty_indicator()
 
     # ──────────────────────────────────────────────────────────────────────────
     # 文件夹 & 图片
@@ -794,10 +855,11 @@ class MainWindow(QMainWindow):
                 vis = not self.state.is_mask_visible
                 self.state.is_mask_visible = vis
                 self.btn_mask_vis.setChecked(vis)
-                self._refresh_display()
+                self.viewer.set_overlay_visible(vis)
 
             elif ep_on and not (mods & Qt.AltModifier) and key == Qt.Key_1:
                 self.engine.cancel()
+                self.viewer.clear_stroke()
                 self.edit_panel.set_tool_btn(DrawTool.LINE)
                 self.state.tool = DrawTool.LINE
                 self.state.brush_size = 3
@@ -806,6 +868,7 @@ class MainWindow(QMainWindow):
 
             elif ep_on and not (mods & Qt.AltModifier) and key == Qt.Key_2:
                 self.engine.cancel()
+                self.viewer.clear_stroke()
                 self.edit_panel.set_tool_btn(DrawTool.POLY)
                 self.state.tool = DrawTool.POLY
                 self.state.brush_size = 1
@@ -814,6 +877,7 @@ class MainWindow(QMainWindow):
 
             elif ep_on and not (mods & Qt.AltModifier) and key in (Qt.Key_E, Qt.Key_3):
                 self.engine.cancel()
+                self.viewer.clear_stroke()
 
                 if self.state.tool == DrawTool.ERASER:
                     self.state.tool = self._last_pen_tool

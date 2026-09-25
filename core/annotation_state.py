@@ -118,9 +118,11 @@ class AnnotationState:
         """返回 [(类别名, 像素数), ...] 列表（只含非零像素）"""
         if self.mask_img is None:
             return []
+        counts = np.bincount(self.mask_img.reshape(-1), minlength=256)
         result = []
         for cls in self.classes:
-            cnt = int(np.sum(self.mask_img == cls["value"]))
+            value = int(cls["value"])
+            cnt = int(counts[value]) if 0 <= value < len(counts) else 0
             if cnt > 0:
                 result.append((cls["name"], cnt))
         return result

@@ -1,7 +1,10 @@
 # ui/graphics_view.py
-from PyQt5.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsEllipseItem
+from PyQt5.QtWidgets import (
+    QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
+    QGraphicsEllipseItem, QGraphicsPathItem,
+)
 from PyQt5.QtCore import Qt, pyqtSignal, QPoint
-from PyQt5.QtGui import QPainter, QPixmap, QPen
+from PyQt5.QtGui import QPainter, QPixmap, QPen, QPainterPath, QColor
 from core.config import DrawTool
 
 class InteractiveGraphicsView(QGraphicsView):
@@ -20,6 +23,18 @@ class InteractiveGraphicsView(QGraphicsView):
         self.setScene(self._scene)
         self.image_item = QGraphicsPixmapItem()
         self._scene.addItem(self.image_item)
+
+        # 掩膜与原图是两个独立图层，绘制时不再重建原图。
+        self.overlay_item = QGraphicsPixmapItem()
+        self.overlay_item.setZValue(10)
+        self._scene.addItem(self.overlay_item)
+
+        # 当前笔划使用轻量矢量路径预览，松开后再更新掩膜图层。
+        self.stroke_item = QGraphicsPathItem()
+        self.stroke_item.setZValue(20)
+        self.stroke_item.hide()
+        self._scene.addItem(self.stroke_item)
+        self._stroke_path = QPainterPath()
 
         # --- 新增：动态光标（橡皮擦圆圈） ---
         self.cursor_item = QGraphicsEllipseItem()
@@ -88,9 +103,39 @@ class InteractiveGraphicsView(QGraphicsView):
     def update_image(self, pixmap: QPixmap):
         self.image_item.setPixmap(pixmap)
 
+    def set_overlay(self, pixmap: QPixmap):
+        self.overlay_item.setPixmap(pixmap)
+
+    def set_overlay_visible(self, visible: bool):
+        self.overlay_item.setVisible(visible)
+
+    def begin_stroke(self, x: int, y: int, tool: str, color: QColor, width: int):
+        self._stroke_path = QPainterPath()
+        self._stroke_path.moveTo(x, y)
+        pen_color = QColor(255, 255, 255, 220) if tool == DrawTool.ERASER else color
+        pen = QPen(pen_color, max(1, width), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        if tool == DrawTool.ERASER:
+            pen.setStyle(Qt.DashLine)
+        self.stroke_item.setPen(pen)
+        self.stroke_item.setPath(self._stroke_path)
+        self.stroke_item.show()
+
+    def extend_stroke(self, x: int, y: int):
+        if not self.stroke_item.isVisible():
+            return
+        self._stroke_path.lineTo(x, y)
+        self.stroke_item.setPath(self._stroke_path)
+
+    def clear_stroke(self):
+        self.stroke_item.hide()
+        self._stroke_path = QPainterPath()
+        self.stroke_item.setPath(self._stroke_path)
+
     def clear_image(self):
         """清空当前图像，但保留可重用的场景和光标对象。"""
         self.image_item.setPixmap(QPixmap())
+        self.overlay_item.setPixmap(QPixmap())
+        self.clear_stroke()
         self.cursor_item.hide()
         self.setSceneRect(0, 0, 0, 0)
         self.resetTransform()
