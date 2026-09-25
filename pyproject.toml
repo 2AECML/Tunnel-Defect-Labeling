@@ -1,0 +1,73 @@
+# pyproject.toml
+# 符合 PEP 517/518/621 的现代打包配置
+# 同时作为项目元数据的唯一来源（SSOT）
+
+[build-system]
+requires      = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 项目元数据
+# ──────────────────────────────────────────────────────────────────────────────
+[project]
+name        = "mask-annotator"
+version     = "1.0.0"
+description = "多病害图像掩膜标注系统（支持线状/面状病害）"
+readme      = "README.md"
+license     = { text = "MIT" }
+requires-python = ">=3.10"
+
+keywords = [
+    "annotation", "mask", "segmentation",
+    "crack detection", "image labeling", "PyQt5"
+]
+
+# ── 运行时依赖（与 requirements.txt 保持一致）──
+dependencies = [
+    "PyQt5>=5.15.9,<5.16",
+    "PyQt5-Qt5>=5.15.2",
+    "PyQt5-sip>=12.13.0",
+    "opencv-python>=4.8.0,<5.0",
+    "numpy>=1.24.0,<3.0",
+]
+
+# ── 可选依赖（开发 / 测试用）──
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-qt>=4.2",      # PyQt5 单元测试支持
+    "mypy>=1.8",
+    "ruff>=0.4",           # 快速 linter / formatter
+]
+
+# ── 命令行入口点 ──
+[project.scripts]
+mask-annotator = "main:main"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# setuptools 配置
+# ──────────────────────────────────────────────────────────────────────────────
+[tool.setuptools.packages.find]
+where   = ["."]
+include = ["core*", "ui*", "utils*"]
+exclude = ["tests*", "*.egg-info"]
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 工具配置
+# ──────────────────────────────────────────────────────────────────────────────
+[tool.ruff]
+line-length    = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]   # pycodestyle + pyflakes + isort
+ignore = ["E501"]               # 长行由 line-length 控制
+
+[tool.mypy]
+python_version         = "3.10"
+ignore_missing_imports = true   # PyQt5 无官方 stub，忽略
+strict                 = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+qt_api    = "pyqt5"

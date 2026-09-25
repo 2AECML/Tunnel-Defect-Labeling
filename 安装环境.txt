@@ -1,0 +1,6 @@
+pip install "PyQt5>=5.15.9,<5.16"
+pip install "opencv-python>=4.8.0,<5.0"
+pip install "numpy>=1.24.0,<3.0"
+
+验证环境
+python -c "import PyQt5.QtCore; import cv2; import numpy; print('PyQt5:', PyQt5.QtCore.PYQT_VERSION_STR); print('OpenCV:', cv2.__version__); print('NumPy:', numpy.__version__)"
