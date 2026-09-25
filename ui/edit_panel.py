@@ -384,6 +384,13 @@ class EditPanel(QWidget):
         else:
             self.btn_eraser.setChecked(True)
 
+    def set_brush_value(self, value):
+        self.slider_brush.setValue(value)
+
+    def set_class_index(self, index):
+        if 0 <= index < self.combo_class.count():
+            self.combo_class.setCurrentIndex(index)
+
     def alpha_value(self):
         return self.slider_alpha.value()
 

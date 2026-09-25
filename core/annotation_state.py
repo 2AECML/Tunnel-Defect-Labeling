@@ -43,6 +43,19 @@ class AnnotationState:
 
         # 撤销
         self.undo_stack: list = []
+        self.edit_revision: int = 0
+        self.saved_revision: int = 0
+
+    @property
+    def is_dirty(self) -> bool:
+        """当前掩膜是否有未保存修改。"""
+        return self.edit_revision != self.saved_revision
+
+    def mark_modified(self):
+        self.edit_revision += 1
+
+    def mark_saved(self):
+        self.saved_revision = self.edit_revision
 
     # ──────────────────────────────────────────────────────────────────────────
     # 类别属性快捷访问
@@ -79,7 +92,7 @@ class AnnotationState:
         """将当前掩膜推入撤销栈"""
         if self.mask_img is None:
             return
-        self.undo_stack.append(self.mask_img.copy())
+        self.undo_stack.append((self.mask_img.copy(), self.edit_revision))
         if len(self.undo_stack) > MAX_UNDO:
             self.undo_stack.pop(0)
 
@@ -87,7 +100,12 @@ class AnnotationState:
         """弹出撤销栈，返回是否成功"""
         if not self.undo_stack:
             return False
-        self.mask_img = self.undo_stack.pop()
+        item = self.undo_stack.pop()
+        if isinstance(item, tuple):
+            self.mask_img, self.edit_revision = item
+        else:  # 兼容旧的撤销栈内容
+            self.mask_img = item
+            self.edit_revision = max(0, self.edit_revision - 1)
         return True
 
     def can_undo(self) -> bool:
@@ -114,3 +132,5 @@ class AnnotationState:
         self.mask_img = mask_img if mask_img is not None else np.zeros(
             orig_img.shape[:2], dtype=np.uint8)
         self.undo_stack.clear()
+        self.edit_revision = 0
+        self.saved_revision = 0

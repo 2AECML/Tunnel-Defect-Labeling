@@ -26,7 +26,7 @@ class DrawEngine:
         return self._phase != DrawPhase.IDLE
 
     # ──────────────────────────────────────────────────────────────────────────
-    # 核心绘制逻辑：点击 -> 移动(跟随) -> 点击
+    # 核心绘制逻辑：按下 -> 拖动 -> 松开
     # ──────────────────────────────────────────────────────────────────────────
     def on_press(self, x: int, y: int):
         tool = self._state.tool
@@ -34,31 +34,19 @@ class DrawEngine:
         if mask is None:
             return
 
-        # 第一下点击：开始绘制
-        if self._phase == DrawPhase.IDLE:
-            self._phase = DrawPhase.DRAWING
-            self._last_pos = (x, y)
-            self._state.push_undo()
+        if self._phase != DrawPhase.IDLE:
+            return
+        self._phase = DrawPhase.DRAWING
+        self._last_pos = (x, y)
+        self._state.push_undo()
+        self._state.mark_modified()
 
-            if tool == DrawTool.POLY:
-                self._poly_points = [(x, y)]
-            elif tool in (DrawTool.LINE, DrawTool.ERASER):
-                # 原地画一个起始点
-                color = self._state.current_draw_value if tool == DrawTool.LINE else 0
-                brush = self._state.brush_size
-                cv2.circle(mask, (x, y), max(1, brush // 2), color, -1)
-
-        # 第二下点击：结束绘制
-        elif self._phase == DrawPhase.DRAWING:
-            if tool == DrawTool.POLY and len(self._poly_points) > 2:
-                # 面状笔：闭合并填充
-                pts = np.array(self._poly_points, np.int32)
-                color = self._state.current_draw_value
-                cv2.fillPoly(mask, [pts], color)
-
-            self._poly_points = []
-            self._last_pos = None
-            self._phase = DrawPhase.IDLE
+        if tool == DrawTool.POLY:
+            self._poly_points = [(x, y)]
+        else:
+            color = self._state.current_draw_value if tool == DrawTool.LINE else 0
+            brush = self._state.brush_size
+            cv2.circle(mask, (x, y), max(1, brush // 2), color, -1)
 
     def on_move(self, x: int, y: int):
         if self._phase != DrawPhase.DRAWING or self._last_pos is None:
@@ -90,19 +78,41 @@ class DrawEngine:
             self._last_pos = (x, y)
 
     def on_release(self, x: int, y: int):
-        # 取消拖拽松开结束的逻辑，交由第二次 Click (on_press) 处理
-        pass
+        if self._phase != DrawPhase.DRAWING:
+            return
+        if self._state.tool == DrawTool.POLY:
+            if len(self._poly_points) > 2:
+                pts = np.array(self._poly_points, np.int32)
+                cv2.fillPoly(
+                    self._state.mask_img,
+                    [pts],
+                    self._state.current_draw_value,
+                )
+            else:
+                # 轻点时仍留下一个可见的小标记。
+                cv2.circle(
+                    self._state.mask_img,
+                    (x, y),
+                    max(1, self._state.brush_size // 2),
+                    self._state.current_draw_value,
+                    -1,
+                )
+        self._finish()
 
     def on_double_click(self, x: int, y: int):
-        # 兼容双击：防止用户连续点击两下导致状态机错乱，强制结束
-        if self._phase == DrawPhase.DRAWING:
-            self.on_press(x, y)
+        # 按下拖动已经是完整笔划，双击不再承担结束操作。
+        pass
 
-    def cancel(self):
-        """取消当前笔划（Esc）"""
+    def _finish(self):
         self._poly_points = []
         self._last_pos = None
         self._phase = DrawPhase.IDLE
+
+    def cancel(self):
+        """取消当前笔划（Esc）"""
+        if self._phase == DrawPhase.DRAWING:
+            self._state.pop_undo()
+        self._finish()
 
     def draw_line_preview(self, display_img: np.ndarray, cursor_pos: tuple[int, int] | None = None):
         # 由于我们改为直接实时在 mask 上画线了，不再需要收集节点画幽灵预览线

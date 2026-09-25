@@ -77,17 +77,33 @@ class InteractiveGraphicsView(QGraphicsView):
     def set_image(self, pixmap: QPixmap):
         self.image_item.setPixmap(pixmap)
         self.setSceneRect(self.image_item.boundingRect())
-        self.fitInView(self.sceneRect(), Qt.KeepAspectRatio)
+        self.fit_image()
+
+    def fit_image(self):
+        """恢复到整图适应窗口的视图。"""
+        if not self.image_item.pixmap().isNull():
+            self.resetTransform()
+            self.fitInView(self.sceneRect(), Qt.KeepAspectRatio)
 
     def update_image(self, pixmap: QPixmap):
         self.image_item.setPixmap(pixmap)
+
+    def clear_image(self):
+        """清空当前图像，但保留可重用的场景和光标对象。"""
+        self.image_item.setPixmap(QPixmap())
+        self.cursor_item.hide()
+        self.setSceneRect(0, 0, 0, 0)
+        self.resetTransform()
 
     # ──────────────────────────────────────────────────────────────────────────
     # 事件
     # ──────────────────────────────────────────────────────────────────────────
     def wheelEvent(self, event):
         factor = 1.15 if event.angleDelta().y() > 0 else 1.0 / 1.15
-        self.scale(factor, factor)
+        current = self.transform().m11()
+        target = current * factor
+        if 0.02 <= target <= 80.0:
+            self.scale(factor, factor)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.RightButton:
@@ -129,7 +145,11 @@ class InteractiveGraphicsView(QGraphicsView):
             self._pan_start = None
             self._update_cursor_display()
             return
-        # 左键松开事件不再处理绘制逻辑，因为现在是 "点击开始 - 点击结束"
+        if self._is_edit_mode and event.button() == Qt.LeftButton:
+            pos = self.mapToScene(event.pos())
+            self.release_signal.emit(int(pos.x()), int(pos.y()))
+            event.accept()
+            return
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):

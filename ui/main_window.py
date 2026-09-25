@@ -251,6 +251,7 @@ class MainWindow(QMainWindow):
 
         self.btn_prev = _btn("◀  上一张", "navBtn", tooltip="上一张 (← / A)")
         self.btn_prev.setFixedWidth(96)
+        self.btn_prev.setEnabled(False)
         self.btn_prev.clicked.connect(self._prev_image)
 
         self.lbl_info = QLabel("—  /  —")
@@ -260,7 +261,14 @@ class MainWindow(QMainWindow):
 
         self.btn_next = _btn("下一张  ▶", "navBtn", tooltip="下一张 (→)")
         self.btn_next.setFixedWidth(96)
+        self.btn_next.setEnabled(False)
         self.btn_next.clicked.connect(self._next_image)
+
+        self.btn_save_next = _btn("💾  保存并下一张", "saveNextBtn",
+                                  tooltip="保存当前掩膜并进入下一张 (D)")
+        self.btn_save_next.setFixedWidth(144)
+        self.btn_save_next.setEnabled(False)
+        self.btn_save_next.clicked.connect(self._save_and_next)
 
         lbl_jump = QLabel("跳至")
         lbl_jump.setObjectName("jumpLabel")
@@ -275,6 +283,7 @@ class MainWindow(QMainWindow):
         bl.addWidget(self.btn_prev)
         bl.addWidget(self.lbl_info)
         bl.addWidget(self.btn_next)
+        bl.addWidget(self.btn_save_next)
         bl.addSpacing(20)
         bl.addWidget(lbl_jump)
         bl.addWidget(self.spin_jump)
@@ -463,6 +472,50 @@ class MainWindow(QMainWindow):
             self.edit_panel.set_stats(
                 class_pixel_stats_str(self.state.mask_img, self.state.classes))
         self._refresh_display()
+        self._update_dirty_indicator()
+
+    def _update_dirty_indicator(self):
+        if not self.image_files or self.current_index < 0:
+            return
+        filename = self.image_files[self.current_index]
+        if self.state.is_dirty:
+            t = THEMES[self._theme_name]
+            self.lbl_status.setText("● 当前标注尚未保存")
+            self.lbl_status.setStyleSheet(
+                f"color:{t['text_accent']}; font-size:11px; font-weight:600;")
+            self.setWindowTitle(f"Mask Annotator  ·  {filename}  *")
+        else:
+            has_mask = bool(
+                self.mask_folder
+                and find_mask_path(self.mask_folder, filename, VALID_IMAGE_EXTS)
+            )
+            t = THEMES[self._theme_name]
+            self.lbl_status.setText(
+                "✓ 当前掩膜已保存" if has_mask else "○ 当前图像还没有掩膜"
+            )
+            self.lbl_status.setStyleSheet(
+                f"color:{t['status_ok'] if has_mask else t['text_muted']}; font-size:11px;"
+            )
+            self.setWindowTitle(f"Mask Annotator  ·  {filename}")
+
+    def _confirm_save_if_dirty(self) -> bool:
+        """在切换图像、文件夹或退出前保护未保存标注。"""
+        if not self.state.is_dirty:
+            return True
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("尚未保存")
+        box.setText("当前图像的标注尚未保存。")
+        box.setInformativeText("保存后继续，还是放弃本次修改？")
+        save_btn = box.addButton("保存", QMessageBox.AcceptRole)
+        discard_btn = box.addButton("放弃修改", QMessageBox.DestructiveRole)
+        box.addButton("取消", QMessageBox.RejectRole)
+        box.setDefaultButton(save_btn)
+        box.exec_()
+        clicked = box.clickedButton()
+        if clicked == save_btn:
+            return self._save_mask()
+        return clicked == discard_btn
 
     # ──────────────────────────────────────────────────────────────────────────
     # 显示刷新
@@ -503,6 +556,7 @@ class MainWindow(QMainWindow):
             self.viewer.set_image(px)
         else:
             self.viewer.update_image(px)
+        self._update_dirty_indicator()
 
     # ──────────────────────────────────────────────────────────────────────────
     # 掩膜可见切换
@@ -521,7 +575,8 @@ class MainWindow(QMainWindow):
             self._refresh_display()
 
     def _commit_line(self):
-        self.engine.commit()
+        if self.engine.is_active and self._cursor_pos is not None:
+            self.engine.on_release(*self._cursor_pos)
         self._post_draw()
 
     def _cancel_line(self):
@@ -533,7 +588,7 @@ class MainWindow(QMainWindow):
     # ──────────────────────────────────────────────────────────────────────────
     def _load_orig_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "选择原图文件夹")
-        if folder:
+        if folder and self._confirm_save_if_dirty():
             self.orig_folder = folder
             short = os.path.basename(folder)
             self.lbl_orig.setText(f"📁 {short}")
@@ -544,7 +599,7 @@ class MainWindow(QMainWindow):
 
     def _load_mask_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "选择掩膜文件夹")
-        if folder:
+        if folder and self._confirm_save_if_dirty():
             self.mask_folder = folder
             short = os.path.basename(folder)
             self.lbl_mask_path.setText(f"📁 {short}")
@@ -562,20 +617,38 @@ class MainWindow(QMainWindow):
         if self.image_files:
             self.current_index = 0
             self._load_current_image()
+        else:
+            self.current_index = -1
+            self.state.orig_img = None
+            self.state.mask_img = None
+            self.viewer.clear_image()
+            self.lbl_info.setText("—  /  —")
+            self.lbl_status.setText("所选原图文件夹中没有可支持的图像")
+            self.btn_prev.setEnabled(False)
+            self.btn_next.setEnabled(False)
+            self.btn_save_next.setEnabled(False)
+            self.btn_delete.setEnabled(False)
 
     def _jump_to(self):
         idx = self.spin_jump.value() - 1
-        if 0 <= idx < len(self.image_files):
+        if (0 <= idx < len(self.image_files) and idx != self.current_index
+                and self._confirm_save_if_dirty()):
             self.current_index = idx
             self._load_current_image()
 
     def _prev_image(self):
-        if self.current_index > 0:
+        if self.current_index > 0 and self._confirm_save_if_dirty():
             self.current_index -= 1
             self._load_current_image()
 
     def _next_image(self):
-        if self.current_index < len(self.image_files) - 1:
+        if (self.current_index < len(self.image_files) - 1
+                and self._confirm_save_if_dirty()):
+            self.current_index += 1
+            self._load_current_image()
+
+    def _save_and_next(self):
+        if self._save_mask() and self.current_index < len(self.image_files) - 1:
             self.current_index += 1
             self._load_current_image()
 
@@ -607,6 +680,9 @@ class MainWindow(QMainWindow):
         self.state.load_image_and_mask(orig_img, mask_img)
         self.engine.cancel()
         self.btn_delete.setEnabled(True)
+        self.btn_prev.setEnabled(self.current_index > 0)
+        self.btn_next.setEnabled(self.current_index < total - 1)
+        self.btn_save_next.setEnabled(True)
 
         if self.edit_panel:
             self.edit_panel.set_undo_enabled(False)
@@ -629,12 +705,20 @@ class MainWindow(QMainWindow):
     # 保存 & 删除
     # ──────────────────────────────────────────────────────────────────────────
     def _save_mask(self) -> bool:
-        if self.state.mask_img is None or not self.mask_folder:
-            QMessageBox.warning(self, "错误", "没有可保存的掩膜或未选择掩膜文件夹！")
+        if self.state.mask_img is None:
+            QMessageBox.warning(self, "无法保存", "当前没有可保存的掩膜。")
             return False
+        if not self.mask_folder:
+            folder = QFileDialog.getExistingDirectory(self, "选择掩膜保存文件夹")
+            if not folder:
+                return False
+            self.mask_folder = folder
+            self.lbl_mask_path.setText(f"📁 {os.path.basename(folder)}")
+            self.lbl_mask_path.setToolTip(folder)
         filename  = self.image_files[self.current_index]
         save_path = mask_save_path(self.mask_folder, filename)
         if imwrite_unicode(save_path, self.state.mask_img):
+            self.state.mark_saved()
             stats = self.state.class_pixel_stats()
             s     = ", ".join(f"{n}:{c}px" for n, c in stats) or "全背景"
             t     = THEMES[self._theme_name]
@@ -681,8 +765,11 @@ class MainWindow(QMainWindow):
             self.state.orig_img = None
             self.state.mask_img = None
             self.lbl_info.setText("—  /  —")
-            self.viewer._scene.clear()
+            self.viewer.clear_image()
             self.btn_delete.setEnabled(False)
+            self.btn_prev.setEnabled(False)
+            self.btn_next.setEnabled(False)
+            self.btn_save_next.setEnabled(False)
             self.lbl_status.setText("文件夹已清空")
         else:
             if self.current_index >= len(self.image_files):
@@ -702,41 +789,44 @@ class MainWindow(QMainWindow):
             elif key == Qt.Key_Right:
                 self._next_image()
             elif key == Qt.Key_D and not (mods & Qt.ControlModifier):
-                if not self._save_mask(): return
-                self._next_image()
+                self._save_and_next()
             elif key == Qt.Key_W:
                 vis = not self.state.is_mask_visible
                 self.state.is_mask_visible = vis
                 self.btn_mask_vis.setChecked(vis)
                 self._refresh_display()
 
-            elif ep_on and key == Qt.Key_1:
+            elif ep_on and not (mods & Qt.AltModifier) and key == Qt.Key_1:
                 self.engine.cancel()
                 self.edit_panel.set_tool_btn(DrawTool.LINE)
                 self.state.tool = DrawTool.LINE
                 self.state.brush_size = 3
+                self.edit_panel.set_brush_value(3)
                 self.viewer.update_cursor_state(self.state.tool, self.state.brush_size)
 
-            elif ep_on and key == Qt.Key_2:
+            elif ep_on and not (mods & Qt.AltModifier) and key == Qt.Key_2:
                 self.engine.cancel()
                 self.edit_panel.set_tool_btn(DrawTool.POLY)
                 self.state.tool = DrawTool.POLY
                 self.state.brush_size = 1
+                self.edit_panel.set_brush_value(1)
                 self.viewer.update_cursor_state(self.state.tool, self.state.brush_size)
 
-            elif ep_on and key in (Qt.Key_E, Qt.Key_3):
+            elif ep_on and not (mods & Qt.AltModifier) and key in (Qt.Key_E, Qt.Key_3):
                 self.engine.cancel()
 
                 if self.state.tool == DrawTool.ERASER:
                     self.state.tool = self._last_pen_tool
                     self.state.brush_size = self._last_pen_size
                     self.edit_panel.set_tool_btn(self.state.tool)
+                    self.edit_panel.set_brush_value(self.state.brush_size)
                 else:
                     self._last_pen_tool = self.state.tool
                     self._last_pen_size = self.state.brush_size
                     self.state.tool = DrawTool.ERASER
                     self.state.brush_size = 20
                     self.edit_panel.set_tool_btn(DrawTool.ERASER)
+                    self.edit_panel.set_brush_value(20)
 
                 self.viewer.update_cursor_state(self.state.tool, self.state.brush_size)
 
@@ -745,6 +835,16 @@ class MainWindow(QMainWindow):
                     self._commit_line()
             elif key == Qt.Key_Escape:
                 self._cancel_line()
+            elif key in (Qt.Key_F, Qt.Key_0):
+                self.viewer.fit_image()
+            elif ep_on and key in (Qt.Key_BracketLeft, Qt.Key_BracketRight):
+                delta = -1 if key == Qt.Key_BracketLeft else 1
+                self.edit_panel.set_brush_value(
+                    max(1, min(80, self.state.brush_size + delta)))
+            elif ep_on and (mods & Qt.AltModifier) and Qt.Key_1 <= key <= Qt.Key_9:
+                idx = key - Qt.Key_1
+                if idx < len(self.state.classes):
+                    self.edit_panel.set_class_index(idx)
             elif mods == Qt.ControlModifier and key == Qt.Key_S:
                 self._save_mask()
             elif mods == Qt.ControlModifier and key == Qt.Key_Z:
@@ -753,6 +853,9 @@ class MainWindow(QMainWindow):
                 self._delete_current()
 
     def closeEvent(self, event):
+        if not self._confirm_save_if_dirty():
+            event.ignore()
+            return
         if self.edit_panel:
             self.edit_panel.close()
         super().closeEvent(event)
