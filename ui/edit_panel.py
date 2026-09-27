@@ -124,18 +124,34 @@ class EditPanel(QWidget):
         self.btn_line = self._tool_btn("🖌", "线状笔", "[ 1 ]")
         self.btn_poly = self._tool_btn("⬛", "面状笔", "[ 2 ]")
         self.btn_eraser = self._tool_btn("⬜", "橡皮擦", "[ E ]")
+        self.btn_edit_poly = QPushButton("◇  编辑已有多边形    [ 4 ]")
+        self.btn_edit_poly.setObjectName("toolBtn")
+        self.btn_edit_poly.setCheckable(True)
+        self.btn_edit_poly.setFixedHeight(38)
         grp = QButtonGroup(self)
-        for b in (self.btn_line, self.btn_poly, self.btn_eraser):
+        for b in (self.btn_line, self.btn_poly, self.btn_eraser, self.btn_edit_poly):
             grp.addButton(b)
         self.btn_line.setChecked(True)
         self.btn_line.clicked.connect(lambda: self._on_tool(DrawTool.LINE))
         self.btn_poly.clicked.connect(lambda: self._on_tool(DrawTool.POLY))
         self.btn_eraser.clicked.connect(lambda: self._on_tool(DrawTool.ERASER))
+        self.btn_edit_poly.clicked.connect(
+            lambda: self._on_tool(DrawTool.EDIT_POLY)
+        )
         tool_row.addWidget(self.btn_line)
         tool_row.addWidget(self.btn_poly)
         tool_row.addWidget(self.btn_eraser)
         tool_row.addStretch()
         v.addLayout(tool_row)
+        v.addWidget(self.btn_edit_poly)
+        self.lbl_polygon_hint = QLabel(
+            "单击已有面状区域选中；拖动控制点改形，"
+            "拖动区域内部整体移动；双击边线增加控制点。"
+        )
+        self.lbl_polygon_hint.setObjectName("statsLabel")
+        self.lbl_polygon_hint.setWordWrap(True)
+        self.lbl_polygon_hint.hide()
+        v.addWidget(self.lbl_polygon_hint)
 
         # ！！ 这里删除了原本所有的 line_hint 提示框相关的代码 ！！
 
@@ -267,9 +283,15 @@ class EditPanel(QWidget):
             self.slider_brush.setValue(DEFAULT_BRUSH_LINE)
         elif tool == DrawTool.POLY:
             self.slider_brush.setValue(DEFAULT_BRUSH_POLY)
-        else:
+        elif tool == DrawTool.ERASER:
             self.slider_brush.setValue(DEFAULT_BRUSH_ERASER)
+        self._update_tool_controls(tool)
         self.tool_changed.emit(tool)
+
+    def _update_tool_controls(self, tool):
+        editing_polygon = tool == DrawTool.EDIT_POLY
+        self.slider_brush.setEnabled(not editing_polygon)
+        self.lbl_polygon_hint.setVisible(editing_polygon)
 
     def _on_class_changed(self, idx):
         if 0 <= idx < len(self.state.classes):
@@ -381,8 +403,11 @@ class EditPanel(QWidget):
             self.btn_line.setChecked(True)
         elif tool == DrawTool.POLY:
             self.btn_poly.setChecked(True)
-        else:
+        elif tool == DrawTool.ERASER:
             self.btn_eraser.setChecked(True)
+        else:
+            self.btn_edit_poly.setChecked(True)
+        self._update_tool_controls(tool)
 
     def set_brush_value(self, value):
         self.slider_brush.setValue(value)

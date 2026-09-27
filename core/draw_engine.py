@@ -31,7 +31,7 @@ class DrawEngine:
     def on_press(self, x: int, y: int):
         tool = self._state.tool
         mask = self._state.mask_img
-        if mask is None:
+        if mask is None or tool == DrawTool.EDIT_POLY:
             return
 
         if self._phase != DrawPhase.IDLE:

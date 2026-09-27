@@ -16,7 +16,9 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QRect, QPoint
 from PyQt5.QtGui import QImage, QPixmap, QColor, QPalette, QFontMetrics, QFont, QScreen
 
-from core import AnnotationState, DrawEngine, DrawTool, VALID_IMAGE_EXTS
+from core import (
+    AnnotationState, DrawEngine, DrawTool, PolygonEditor, VALID_IMAGE_EXTS
+)
 from utils import (imread_unicode, imwrite_unicode, scan_images,
                    find_mask_path, mask_save_path,
                    mask_to_overlay_rgba, adjust_brightness_contrast,
@@ -86,6 +88,7 @@ class MainWindow(QMainWindow):
         # ── 核心数据 ──
         self.state  = AnnotationState()
         self.engine = DrawEngine(self.state)
+        self.polygon_editor = PolygonEditor()
 
         self._last_pen_tool = DrawTool.LINE
         self._last_pen_size = 3
@@ -396,6 +399,7 @@ class MainWindow(QMainWindow):
             was_active = self.engine.is_active
             self.engine.cancel()
             self.viewer.clear_stroke()
+            self._clear_polygon_selection()
             if was_active and self.edit_panel:
                 self.edit_panel.set_undo_enabled(self.state.can_undo())
             self._update_dirty_indicator()
@@ -436,6 +440,29 @@ class MainWindow(QMainWindow):
         mask = self.state.mask_img
         if mask is None or not (0 <= x < mask.shape[1] and 0 <= y < mask.shape[0]):
             return
+        if self.state.tool == DrawTool.EDIT_POLY:
+            scale = max(0.001, self.viewer.transform().m11())
+            tolerance = min(50.0, 9.0 / scale)
+            vertex = self.polygon_editor.hit_vertex(x, y, tolerance)
+            if vertex is not None:
+                self.polygon_editor.begin_drag(x, y, vertex)
+                self.viewer.set_polygon_edit(
+                    self.polygon_editor.vertices, active_index=vertex
+                )
+                return
+            if self.polygon_editor.contains(x, y):
+                self.polygon_editor.begin_drag(x, y, None)
+                return
+            if self.polygon_editor.select(mask, x, y):
+                self.viewer.set_polygon_edit(self.polygon_editor.vertices)
+                for index, cls in enumerate(self.state.classes):
+                    if int(cls["value"]) == self.polygon_editor.value:
+                        if self.edit_panel:
+                            self.edit_panel.set_class_index(index)
+                        break
+            else:
+                self.viewer.clear_polygon_edit()
+            return
         self.engine.on_press(x, y)
         info = self.state.current_class_info
         b, g, r = info["color"] if info else (255, 255, 255)
@@ -449,12 +476,29 @@ class MainWindow(QMainWindow):
         self._update_dirty_indicator()
 
     def _on_move(self, x, y):
+        if self.state.tool == DrawTool.EDIT_POLY and self.polygon_editor.is_dragging:
+            mask = self.state.mask_img
+            if mask is not None:
+                self.polygon_editor.drag_to(x, y, mask.shape[:2])
+                self.viewer.set_polygon_edit(self.polygon_editor.vertices)
+            return
         if not self.engine.is_active:
             return
         self.engine.on_move(x, y)
         self.viewer.extend_stroke(x, y)
 
     def _on_release(self, x, y):
+        if self.state.tool == DrawTool.EDIT_POLY and self.polygon_editor.is_dragging:
+            if self.polygon_editor.drag_changed():
+                self.state.push_undo()
+                self.state.mark_modified()
+                self.polygon_editor.apply(self.state.mask_img)
+                self.viewer.set_polygon_edit(self.polygon_editor.vertices)
+                self._finish_stroke_update()
+            else:
+                self.polygon_editor.cancel_drag()
+                self.viewer.set_polygon_edit(self.polygon_editor.vertices)
+            return
         if not self.engine.is_active:
             return
         self.engine.on_release(x, y)
@@ -462,8 +506,15 @@ class MainWindow(QMainWindow):
         self._finish_stroke_update()
 
     def _on_dbl_click(self, x, y):
-        # 绘制以鼠标松开为结束，双击不触发额外整图更新。
-        pass
+        if self.state.tool != DrawTool.EDIT_POLY:
+            return
+        scale = max(0.001, self.viewer.transform().m11())
+        tolerance = min(50.0, 9.0 / scale)
+        index = self.polygon_editor.insert_vertex(x, y, tolerance)
+        if index is not None:
+            self.viewer.set_polygon_edit(
+                self.polygon_editor.vertices, active_index=index
+            )
 
     def _on_hover(self, x, y):
         self._cursor_pos = (x, y)
@@ -482,6 +533,7 @@ class MainWindow(QMainWindow):
         was_active = self.engine.is_active
         self.engine.cancel()
         self.viewer.clear_stroke()
+        self._clear_polygon_selection()
         self.state.tool = tool
         self.viewer.update_cursor_state(tool, self.state.brush_size)
         if was_active and self.edit_panel:
@@ -624,6 +676,7 @@ class MainWindow(QMainWindow):
     # ──────────────────────────────────────────────────────────────────────────
     def _undo(self):
         if self.state.pop_undo():
+            self._clear_polygon_selection()
             if self.edit_panel:
                 self.edit_panel.set_undo_enabled(self.state.can_undo())
             self.viewer.clear_stroke()
@@ -638,11 +691,19 @@ class MainWindow(QMainWindow):
         self._post_draw()
 
     def _cancel_line(self):
+        if self.polygon_editor.is_dragging:
+            self.polygon_editor.cancel_drag()
+            self.viewer.set_polygon_edit(self.polygon_editor.vertices)
+            return
         self.engine.cancel()
         self.viewer.clear_stroke()
         if self.edit_panel:
             self.edit_panel.set_undo_enabled(self.state.can_undo())
         self._update_dirty_indicator()
+
+    def _clear_polygon_selection(self):
+        self.polygon_editor.clear()
+        self.viewer.clear_polygon_edit()
 
     # ──────────────────────────────────────────────────────────────────────────
     # 文件夹 & 图片
@@ -739,6 +800,7 @@ class MainWindow(QMainWindow):
                     mask_img = loaded
 
         self.state.load_image_and_mask(orig_img, mask_img)
+        self._clear_polygon_selection()
         self.engine.cancel()
         self.btn_delete.setEnabled(True)
         self.btn_prev.setEnabled(self.current_index > 0)
@@ -860,6 +922,7 @@ class MainWindow(QMainWindow):
             elif ep_on and not (mods & Qt.AltModifier) and key == Qt.Key_1:
                 self.engine.cancel()
                 self.viewer.clear_stroke()
+                self._clear_polygon_selection()
                 self.edit_panel.set_tool_btn(DrawTool.LINE)
                 self.state.tool = DrawTool.LINE
                 self.state.brush_size = 3
@@ -869,6 +932,7 @@ class MainWindow(QMainWindow):
             elif ep_on and not (mods & Qt.AltModifier) and key == Qt.Key_2:
                 self.engine.cancel()
                 self.viewer.clear_stroke()
+                self._clear_polygon_selection()
                 self.edit_panel.set_tool_btn(DrawTool.POLY)
                 self.state.tool = DrawTool.POLY
                 self.state.brush_size = 1
@@ -878,6 +942,7 @@ class MainWindow(QMainWindow):
             elif ep_on and not (mods & Qt.AltModifier) and key in (Qt.Key_E, Qt.Key_3):
                 self.engine.cancel()
                 self.viewer.clear_stroke()
+                self._clear_polygon_selection()
 
                 if self.state.tool == DrawTool.ERASER:
                     self.state.tool = self._last_pen_tool
@@ -892,6 +957,14 @@ class MainWindow(QMainWindow):
                     self.edit_panel.set_tool_btn(DrawTool.ERASER)
                     self.edit_panel.set_brush_value(20)
 
+                self.viewer.update_cursor_state(self.state.tool, self.state.brush_size)
+
+            elif ep_on and not (mods & Qt.AltModifier) and key == Qt.Key_4:
+                self.engine.cancel()
+                self.viewer.clear_stroke()
+                self._clear_polygon_selection()
+                self.edit_panel.set_tool_btn(DrawTool.EDIT_POLY)
+                self.state.tool = DrawTool.EDIT_POLY
                 self.viewer.update_cursor_state(self.state.tool, self.state.brush_size)
 
             elif key in (Qt.Key_Return, Qt.Key_Enter):

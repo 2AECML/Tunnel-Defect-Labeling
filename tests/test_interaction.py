@@ -71,3 +71,27 @@ def test_saved_revision_becomes_dirty_only_after_a_new_stroke():
     assert state.is_dirty
     assert state.pop_undo()
     assert not state.is_dirty
+
+
+def test_existing_polygon_vertex_edit_can_be_undone():
+    from core.polygon_editor import PolygonEditor
+
+    state = _state()
+    state.mask_img[10:41, 10:41] = 3
+    original = state.mask_img.copy()
+    editor = PolygonEditor()
+    assert editor.select(state.mask_img, 20, 20)
+    index = editor.hit_vertex(10, 10, 4)
+    assert index is not None
+
+    editor.begin_drag(10, 10, index)
+    editor.drag_to(5, 5, state.mask_img.shape)
+    state.push_undo()
+    state.mark_modified()
+    editor.apply(state.mask_img)
+
+    assert state.is_dirty
+    assert not np.array_equal(state.mask_img, original)
+    assert state.pop_undo()
+    assert np.array_equal(state.mask_img, original)
+    assert not state.is_dirty

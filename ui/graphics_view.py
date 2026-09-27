@@ -1,7 +1,7 @@
 # ui/graphics_view.py
 from PyQt5.QtWidgets import (
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
-    QGraphicsEllipseItem, QGraphicsPathItem,
+    QGraphicsEllipseItem, QGraphicsPathItem, QGraphicsItem,
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QPoint
 from PyQt5.QtGui import QPainter, QPixmap, QPen, QPainterPath, QColor
@@ -35,6 +35,16 @@ class InteractiveGraphicsView(QGraphicsView):
         self.stroke_item.hide()
         self._scene.addItem(self.stroke_item)
         self._stroke_path = QPainterPath()
+
+        # 已有多边形编辑轮廓与顶点控制柄。
+        self.polygon_edit_item = QGraphicsPathItem()
+        polygon_pen = QPen(QColor(0, 220, 255), 2)
+        polygon_pen.setCosmetic(True)
+        self.polygon_edit_item.setPen(polygon_pen)
+        self.polygon_edit_item.setZValue(30)
+        self.polygon_edit_item.hide()
+        self._scene.addItem(self.polygon_edit_item)
+        self._polygon_handles: list[QGraphicsEllipseItem] = []
 
         # --- 新增：动态光标（橡皮擦圆圈） ---
         self.cursor_item = QGraphicsEllipseItem()
@@ -82,6 +92,9 @@ class InteractiveGraphicsView(QGraphicsView):
         if self._current_tool == DrawTool.ERASER:
             self.viewport().setCursor(Qt.BlankCursor) # 隐藏系统光标
             self.cursor_item.show()                   # 显示圆形光标
+        elif self._current_tool == DrawTool.EDIT_POLY:
+            self.viewport().setCursor(Qt.PointingHandCursor)
+            self.cursor_item.hide()
         else:
             self.viewport().setCursor(Qt.CrossCursor) # 画笔/面状笔使用十字光标
             self.cursor_item.hide()
@@ -131,11 +144,52 @@ class InteractiveGraphicsView(QGraphicsView):
         self._stroke_path = QPainterPath()
         self.stroke_item.setPath(self._stroke_path)
 
+    def set_polygon_edit(self, vertices, active_index: int | None = None):
+        """显示闭合多边形和固定屏幕尺寸的顶点控制柄。"""
+        if vertices is None or len(vertices) < 3:
+            self.clear_polygon_edit()
+            return
+        path = QPainterPath()
+        path.moveTo(float(vertices[0][0]), float(vertices[0][1]))
+        for x, y in vertices[1:]:
+            path.lineTo(float(x), float(y))
+        path.closeSubpath()
+        self.polygon_edit_item.setPath(path)
+        self.polygon_edit_item.show()
+        if len(self._polygon_handles) != len(vertices):
+            for handle in self._polygon_handles:
+                self._scene.removeItem(handle)
+            self._polygon_handles.clear()
+            for _ in vertices:
+                handle = QGraphicsEllipseItem(-4, -4, 8, 8)
+                handle.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+                handle.setPen(QPen(QColor(20, 20, 20), 1))
+                handle.setZValue(31)
+                self._scene.addItem(handle)
+                self._polygon_handles.append(handle)
+        for index, ((x, y), handle) in enumerate(
+            zip(vertices, self._polygon_handles)
+        ):
+            handle.setPos(float(x), float(y))
+            handle.setBrush(
+                QColor(255, 205, 40) if index == active_index
+                else QColor(0, 220, 255)
+            )
+            handle.show()
+
+    def clear_polygon_edit(self):
+        self.polygon_edit_item.hide()
+        self.polygon_edit_item.setPath(QPainterPath())
+        for handle in self._polygon_handles:
+            self._scene.removeItem(handle)
+        self._polygon_handles.clear()
+
     def clear_image(self):
         """清空当前图像，但保留可重用的场景和光标对象。"""
         self.image_item.setPixmap(QPixmap())
         self.overlay_item.setPixmap(QPixmap())
         self.clear_stroke()
+        self.clear_polygon_edit()
         self.cursor_item.hide()
         self.setSceneRect(0, 0, 0, 0)
         self.resetTransform()
