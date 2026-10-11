@@ -95,3 +95,47 @@ def test_existing_polygon_vertex_edit_can_be_undone():
     assert state.pop_undo()
     assert np.array_equal(state.mask_img, original)
     assert not state.is_dirty
+
+
+def test_existing_polygon_deletion_can_be_undone():
+    from core.polygon_editor import PolygonEditor
+
+    state = _state()
+    state.mask_img[10:41, 10:41] = 3
+    original = state.mask_img.copy()
+    editor = PolygonEditor()
+    assert editor.select(state.mask_img, 20, 20)
+
+    state.push_undo()
+    assert editor.delete(state.mask_img)
+    state.mark_modified()
+
+    assert state.is_dirty
+    assert not np.any(state.mask_img)
+    assert state.pop_undo()
+    assert np.array_equal(state.mask_img, original)
+    assert not state.is_dirty
+
+
+def test_existing_polygon_vertex_deletion_can_be_undone():
+    from core.polygon_editor import PolygonEditor
+
+    state = _state()
+    state.mask_img[10:41, 10:41] = 3
+    original = state.mask_img.copy()
+    editor = PolygonEditor()
+    assert editor.select(state.mask_img, 20, 20)
+    index = editor.hit_vertex(10, 10, 4)
+    assert index is not None
+    editor.select_vertex(index)
+
+    state.push_undo()
+    assert editor.delete_selected_vertex()
+    editor.apply(state.mask_img)
+    state.mark_modified()
+
+    assert state.is_dirty
+    assert not np.array_equal(state.mask_img, original)
+    assert state.pop_undo()
+    assert np.array_equal(state.mask_img, original)
+    assert not state.is_dirty

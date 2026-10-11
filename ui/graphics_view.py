@@ -1,18 +1,19 @@
 # ui/graphics_view.py
 from PyQt5.QtWidgets import (
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
-    QGraphicsEllipseItem, QGraphicsPathItem, QGraphicsItem,
+    QGraphicsEllipseItem, QGraphicsPathItem, QGraphicsItem, QApplication,
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QPoint
 from PyQt5.QtGui import QPainter, QPixmap, QPen, QPainterPath, QColor
 from core.config import DrawTool
 
 class InteractiveGraphicsView(QGraphicsView):
-    press_signal     = pyqtSignal(int, int)
-    move_signal      = pyqtSignal(int, int)
-    release_signal   = pyqtSignal(int, int)
-    dbl_click_signal = pyqtSignal(int, int)
+    press_signal     = pyqtSignal(float, float)
+    move_signal      = pyqtSignal(float, float)
+    release_signal   = pyqtSignal(float, float)
+    dbl_click_signal = pyqtSignal(float, float)
     hover_signal     = pyqtSignal(int, int)
+    context_menu_signal = pyqtSignal(int, int, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -57,7 +58,12 @@ class InteractiveGraphicsView(QGraphicsView):
 
         self._is_edit_mode = False
         self._pan_start: QPoint | None = None
+        self._pan_press_pos: QPoint | None = None
+        self._pan_moved = False
         self._current_tool = DrawTool.LINE
+        self._polygon_press_pos: QPoint | None = None
+        self._polygon_drag_started = False
+        self._polygon_double_click = False
 
         # 开启鼠标追踪（无需按下左键也能触发 mouseMoveEvent）
         self.setMouseTracking(True)
@@ -68,6 +74,7 @@ class InteractiveGraphicsView(QGraphicsView):
     # 模式与光标切换
     # ──────────────────────────────────────────────────────────────────────────
     def set_view_mode(self):
+        self._reset_polygon_gesture()
         self._is_edit_mode = False
         self.setDragMode(QGraphicsView.ScrollHandDrag)
         self.viewport().setCursor(Qt.ArrowCursor)
@@ -80,6 +87,8 @@ class InteractiveGraphicsView(QGraphicsView):
 
     def update_cursor_state(self, tool: str, brush_size: int):
         """外部（如MainWindow）在切换工具或画笔大小时调用此方法"""
+        if tool != self._current_tool:
+            self._reset_polygon_gesture()
         self._current_tool = tool
         # 更新橡皮擦圆圈大小 (由于是场景坐标，圆圈会自动完美匹配图像像素并支持缩放)
         r = brush_size / 2.0
@@ -144,29 +153,30 @@ class InteractiveGraphicsView(QGraphicsView):
         self._stroke_path = QPainterPath()
         self.stroke_item.setPath(self._stroke_path)
 
-    def set_polygon_edit(self, vertices, active_index: int | None = None):
-        """显示闭合多边形和固定屏幕尺寸的顶点控制柄。"""
+    def set_polygon_edit(self, vertices, active_index: int | None = None, *, outline_vertices=None):
+        """轮廓线与控制柄分开显示，减少初始控制点不改变真实轮廓。"""
         if vertices is None or len(vertices) < 3:
             self.clear_polygon_edit()
             return
         path = QPainterPath()
-        path.moveTo(float(vertices[0][0]), float(vertices[0][1]))
-        for x, y in vertices[1:]:
+        outline = vertices if outline_vertices is None else outline_vertices
+        path.moveTo(float(outline[0][0]), float(outline[0][1]))
+        for x, y in outline[1:]:
             path.lineTo(float(x), float(y))
         path.closeSubpath()
         self.polygon_edit_item.setPath(path)
         self.polygon_edit_item.show()
-        if len(self._polygon_handles) != len(vertices):
-            for handle in self._polygon_handles:
-                self._scene.removeItem(handle)
-            self._polygon_handles.clear()
-            for _ in vertices:
-                handle = QGraphicsEllipseItem(-4, -4, 8, 8)
-                handle.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
-                handle.setPen(QPen(QColor(20, 20, 20), 1))
-                handle.setZValue(31)
-                self._scene.addItem(handle)
-                self._polygon_handles.append(handle)
+        # Exact outlines can have thousands of points. Reuse existing handles
+        # when inserting/deleting one point rather than recreate them all.
+        while len(self._polygon_handles) > len(vertices):
+            self._scene.removeItem(self._polygon_handles.pop())
+        while len(self._polygon_handles) < len(vertices):
+            handle = QGraphicsEllipseItem(-4, -4, 8, 8)
+            handle.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+            handle.setPen(QPen(QColor(20, 20, 20), 1))
+            handle.setZValue(31)
+            self._scene.addItem(handle)
+            self._polygon_handles.append(handle)
         for index, ((x, y), handle) in enumerate(
             zip(vertices, self._polygon_handles)
         ):
@@ -197,6 +207,11 @@ class InteractiveGraphicsView(QGraphicsView):
     # ──────────────────────────────────────────────────────────────────────────
     # 事件
     # ──────────────────────────────────────────────────────────────────────────
+    def _reset_polygon_gesture(self):
+        self._polygon_press_pos = None
+        self._polygon_drag_started = False
+        self._polygon_double_click = False
+
     def wheelEvent(self, event):
         factor = 1.15 if event.angleDelta().y() > 0 else 1.0 / 1.15
         current = self.transform().m11()
@@ -207,18 +222,30 @@ class InteractiveGraphicsView(QGraphicsView):
     def mousePressEvent(self, event):
         if event.button() == Qt.RightButton:
             self._pan_start = event.pos()
+            self._pan_press_pos = event.pos()
+            self._pan_moved = False
             self.viewport().setCursor(Qt.ClosedHandCursor)
             self.cursor_item.hide()
+            event.accept()
             return
 
         if self._is_edit_mode and event.button() == Qt.LeftButton:
+            if self._current_tool == DrawTool.EDIT_POLY:
+                self._reset_polygon_gesture()
+                self._polygon_press_pos = event.pos()
             pos = self.mapToScene(event.pos())
-            self.press_signal.emit(int(pos.x()), int(pos.y()))
+            self.press_signal.emit(pos.x(), pos.y())
+            event.accept()
         else:
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         if self._pan_start is not None:
+            if not self._pan_moved and self._pan_press_pos is not None:
+                distance = (event.pos() - self._pan_press_pos).manhattanLength()
+                if distance < QApplication.startDragDistance():
+                    return
+                self._pan_moved = True
             delta = event.pos() - self._pan_start
             self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
             self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
@@ -233,28 +260,54 @@ class InteractiveGraphicsView(QGraphicsView):
             self.cursor_item.setPos(pos)
 
         if self._is_edit_mode:
-            # 无论是否按下左键，都发送移动信号（由 draw_engine 判断是否在绘制期）
-            self.move_signal.emit(ix, iy)
+            if self._current_tool == DrawTool.EDIT_POLY:
+                if self._polygon_press_pos is not None and event.buttons() & Qt.LeftButton:
+                    distance = (event.pos() - self._polygon_press_pos).manhattanLength()
+                    if distance >= QApplication.startDragDistance():
+                        self._polygon_drag_started = True
+                    if self._polygon_drag_started:
+                        self.move_signal.emit(pos.x(), pos.y())
+            else:
+                self.move_signal.emit(pos.x(), pos.y())
             self.hover_signal.emit(ix, iy)
         else:
             super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.RightButton:
+            was_click = not self._pan_moved
             self._pan_start = None
+            self._pan_press_pos = None
+            self._pan_moved = False
             self._update_cursor_display()
+            if was_click and self._is_edit_mode:
+                pos = self.mapToScene(event.pos())
+                self.context_menu_signal.emit(
+                    int(pos.x()), int(pos.y()),
+                    self.viewport().mapToGlobal(event.pos()),
+                )
+            event.accept()
             return
         if self._is_edit_mode and event.button() == Qt.LeftButton:
+            if self._current_tool == DrawTool.EDIT_POLY:
+                if self._polygon_double_click or self._polygon_press_pos is None:
+                    self._reset_polygon_gesture()
+                    event.accept()
+                    return
             pos = self.mapToScene(event.pos())
-            self.release_signal.emit(int(pos.x()), int(pos.y()))
+            self.release_signal.emit(pos.x(), pos.y())
+            self._reset_polygon_gesture()
             event.accept()
             return
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):
-        # 也可以保留，防止用户习惯双击结束导致异常
         if self._is_edit_mode and event.button() == Qt.LeftButton:
+            if self._current_tool == DrawTool.EDIT_POLY:
+                self._reset_polygon_gesture()
+                self._polygon_double_click = True
             pos = self.mapToScene(event.pos())
-            self.dbl_click_signal.emit(int(pos.x()), int(pos.y()))
+            self.dbl_click_signal.emit(pos.x(), pos.y())
+            event.accept()
         else:
             super().mouseDoubleClickEvent(event)

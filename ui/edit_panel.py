@@ -73,7 +73,7 @@ class EditPanel(QWidget):
 
     _drag_pos = None
 
-    def __init__(self, state, theme_name="dark", parent=None):
+    def __init__(self, state, theme_name="light", parent=None):
         super().__init__(parent,
                          Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.state = state
@@ -146,7 +146,9 @@ class EditPanel(QWidget):
         v.addWidget(self.btn_edit_poly)
         self.lbl_polygon_hint = QLabel(
             "单击已有面状区域选中；拖动控制点改形，"
-            "拖动区域内部整体移动；双击边线增加控制点。"
+            "拖动区域内部整体移动；双击边线增加控制点；"
+            "加点不改变形状；按住左键拖动改形或移动；"
+            "选中控制点或多边形后，右击或 Ctrl+D 删除。"
         )
         self.lbl_polygon_hint.setObjectName("statsLabel")
         self.lbl_polygon_hint.setWordWrap(True)

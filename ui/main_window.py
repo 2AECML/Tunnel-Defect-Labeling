@@ -11,9 +11,9 @@ from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFileDialog, QSpinBox,
     QMessageBox, QFrame, QApplication, QSizePolicy, QToolButton,
-    QListView
+    QListView, QMenu
 )
-from PyQt5.QtCore import Qt, QRect, QPoint
+from PyQt5.QtCore import Qt, QRect, QPoint, QEvent
 from PyQt5.QtGui import QImage, QPixmap, QColor, QPalette, QFontMetrics, QFont, QScreen
 
 from core import (
@@ -42,6 +42,55 @@ def _hline():
     f.setObjectName("hline")
     f.setFrameShape(QFrame.HLine)
     return f
+
+class ResizeHandle(QWidget):
+    """无边框窗口的透明边缘拖动区域。"""
+
+    def __init__(self, window, edges, cursor):
+        super().__init__(window)
+        self.window = window
+        self.edges = edges
+        self.setCursor(cursor)
+        self._start_pos = None
+        self._start_geometry = None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and not self.window.isMaximized():
+            self._start_pos = event.globalPos()
+            self._start_geometry = self.window.geometry()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._start_pos is None:
+            return
+        delta = event.globalPos() - self._start_pos
+        rect = QRect(self._start_geometry)
+        minimum = self.window.minimumSizeHint().expandedTo(self.window.minimumSize())
+        min_width = max(1, minimum.width())
+        min_height = max(1, minimum.height())
+        if self.edges & Qt.LeftEdge:
+            rect.setLeft(min(rect.right() - min_width + 1,
+                             max(rect.right() - self.window.maximumWidth() + 1,
+                                 rect.left() + delta.x())))
+        if self.edges & Qt.RightEdge:
+            rect.setWidth(max(min_width, min(self.window.maximumWidth(),
+                                            rect.width() + delta.x())))
+        if self.edges & Qt.TopEdge:
+            rect.setTop(min(rect.bottom() - min_height + 1,
+                            max(rect.bottom() - self.window.maximumHeight() + 1,
+                                rect.top() + delta.y())))
+        if self.edges & Qt.BottomEdge:
+            rect.setHeight(max(min_height, min(self.window.maximumHeight(),
+                                              rect.height() + delta.y())))
+        self.window.setGeometry(rect)
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._start_pos = None
+            self._start_geometry = None
+            event.accept()
+
 
 class DraggableTopBar(QWidget):
     """自定义的可拖拽顶部栏"""
@@ -83,7 +132,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Mask Annotator")
 
         self.setWindowFlags(
-            Qt.FramelessWindowHint | Qt.WindowSystemMenuHint | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint)
+            Qt.FramelessWindowHint | Qt.WindowSystemMenuHint
+            | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint)
 
         # ── 核心数据 ──
         self.state  = AnnotationState()
@@ -101,11 +151,54 @@ class MainWindow(QMainWindow):
         self.edit_panel: EditPanel | None = None
 
         # ── 主题 ──
-        self._theme_name = "dark"
+        self._theme_name = "light"
 
         self._build_ui()
+        self._resize_handles = [
+            ResizeHandle(self, edges, cursor)
+            for edges, cursor in (
+                (Qt.LeftEdge, Qt.SizeHorCursor),
+                (Qt.RightEdge, Qt.SizeHorCursor),
+                (Qt.TopEdge, Qt.SizeVerCursor),
+                (Qt.BottomEdge, Qt.SizeVerCursor),
+                (Qt.TopEdge | Qt.LeftEdge, Qt.SizeFDiagCursor),
+                (Qt.TopEdge | Qt.RightEdge, Qt.SizeBDiagCursor),
+                (Qt.BottomEdge | Qt.LeftEdge, Qt.SizeBDiagCursor),
+                (Qt.BottomEdge | Qt.RightEdge, Qt.SizeFDiagCursor),
+            )
+        ]
         self._apply_theme()
         self._adapt_to_screen()
+        self._update_resize_handles()
+
+    def _update_resize_handles(self):
+        if not hasattr(self, "_resize_handles"):
+            return
+        margin = 6
+        width, height = self.width(), self.height()
+        rects = (
+            QRect(0, margin, margin, max(0, height - 2 * margin)),
+            QRect(width - margin, margin, margin, max(0, height - 2 * margin)),
+            QRect(margin, 0, max(0, width - 2 * margin), margin),
+            QRect(margin, height - margin, max(0, width - 2 * margin), margin),
+            QRect(0, 0, margin, margin),
+            QRect(width - margin, 0, margin, margin),
+            QRect(0, height - margin, margin, margin),
+            QRect(width - margin, height - margin, margin, margin),
+        )
+        for handle, rect in zip(self._resize_handles, rects):
+            handle.setGeometry(rect)
+            handle.setVisible(not (self.isMaximized() or self.isFullScreen()))
+            handle.raise_()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_resize_handles()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.WindowStateChange:
+            self._update_resize_handles()
 
     # ──────────────────────────────────────────────────────────────────────────
     # 自适应屏幕
@@ -242,6 +335,7 @@ class MainWindow(QMainWindow):
         self.viewer.release_signal.connect(self._on_release)
         self.viewer.dbl_click_signal.connect(self._on_dbl_click)
         self.viewer.hover_signal.connect(self._on_hover)
+        self.viewer.context_menu_signal.connect(self._on_context_menu)
         ml.addWidget(self.viewer, 1)
 
         # ══ 底部导航栏 ════════════════════════════════════════════════════════
@@ -436,6 +530,13 @@ class MainWindow(QMainWindow):
     # ──────────────────────────────────────────────────────────────────────────
     # 视图事件
     # ──────────────────────────────────────────────────────────────────────────
+    def _show_polygon_selection(self):
+        self.viewer.set_polygon_edit(
+            self.polygon_editor.vertices,
+            active_index=self.polygon_editor.selected_vertex_index,
+            outline_vertices=self.polygon_editor.outline_vertices,
+        )
+
     def _on_press(self, x, y):
         mask = self.state.mask_img
         if mask is None or not (0 <= x < mask.shape[1] and 0 <= y < mask.shape[0]):
@@ -446,15 +547,16 @@ class MainWindow(QMainWindow):
             vertex = self.polygon_editor.hit_vertex(x, y, tolerance)
             if vertex is not None:
                 self.polygon_editor.begin_drag(x, y, vertex)
-                self.viewer.set_polygon_edit(
-                    self.polygon_editor.vertices, active_index=vertex
-                )
+                self._show_polygon_selection()
                 return
-            if self.polygon_editor.contains(x, y):
+            if self.polygon_editor.contains(x, y) or (
+                mask[int(y), int(x)] == 0 and self.polygon_editor.hit_edge(x, y, tolerance)
+            ):
                 self.polygon_editor.begin_drag(x, y, None)
+                self._show_polygon_selection()
                 return
-            if self.polygon_editor.select(mask, x, y):
-                self.viewer.set_polygon_edit(self.polygon_editor.vertices)
+            if self.polygon_editor.select(mask, int(x), int(y)):
+                self._show_polygon_selection()
                 for index, cls in enumerate(self.state.classes):
                     if int(cls["value"]) == self.polygon_editor.value:
                         if self.edit_panel:
@@ -463,6 +565,7 @@ class MainWindow(QMainWindow):
             else:
                 self.viewer.clear_polygon_edit()
             return
+        x, y = int(x), int(y)
         self.engine.on_press(x, y)
         info = self.state.current_class_info
         b, g, r = info["color"] if info else (255, 255, 255)
@@ -480,10 +583,11 @@ class MainWindow(QMainWindow):
             mask = self.state.mask_img
             if mask is not None:
                 self.polygon_editor.drag_to(x, y, mask.shape[:2])
-                self.viewer.set_polygon_edit(self.polygon_editor.vertices)
+                self._show_polygon_selection()
             return
         if not self.engine.is_active:
             return
+        x, y = int(x), int(y)
         self.engine.on_move(x, y)
         self.viewer.extend_stroke(x, y)
 
@@ -493,31 +597,56 @@ class MainWindow(QMainWindow):
                 self.state.push_undo()
                 self.state.mark_modified()
                 self.polygon_editor.apply(self.state.mask_img)
-                self.viewer.set_polygon_edit(self.polygon_editor.vertices)
+                self._show_polygon_selection()
                 self._finish_stroke_update()
             else:
                 self.polygon_editor.cancel_drag()
-                self.viewer.set_polygon_edit(self.polygon_editor.vertices)
+                self._show_polygon_selection()
             return
         if not self.engine.is_active:
             return
-        self.engine.on_release(x, y)
+        self.engine.on_release(int(x), int(y))
         self.viewer.clear_stroke()
         self._finish_stroke_update()
 
     def _on_dbl_click(self, x, y):
         if self.state.tool != DrawTool.EDIT_POLY:
             return
+        self.polygon_editor.cancel_drag()
         scale = max(0.001, self.viewer.transform().m11())
         tolerance = min(50.0, 9.0 / scale)
-        index = self.polygon_editor.insert_vertex(x, y, tolerance)
-        if index is not None:
-            self.viewer.set_polygon_edit(
-                self.polygon_editor.vertices, active_index=index
-            )
+        self.polygon_editor.insert_vertex(x, y, tolerance)
+        self._show_polygon_selection()
 
     def _on_hover(self, x, y):
         self._cursor_pos = (x, y)
+
+    def _on_context_menu(self, x, y, global_pos):
+        if (
+            self.state.tool != DrawTool.EDIT_POLY
+            or not self.polygon_editor.has_selection
+        ):
+            return
+        scale = max(0.001, self.viewer.transform().m11())
+        tolerance = min(50.0, 9.0 / scale)
+        hit_vertex = self.polygon_editor.hit_vertex(x, y, tolerance)
+        selected_vertex = self.polygon_editor.selected_vertex_index
+        menu = QMenu(self)
+        if hit_vertex is not None and hit_vertex == selected_vertex:
+            delete_action = menu.addAction("删除控制点\tCtrl+D")
+            delete_action.setEnabled(len(self.polygon_editor.vertices) > 3)
+            if menu.exec_(global_pos) == delete_action:
+                self._delete_selected_vertex()
+        elif self.polygon_editor.contains(x, y):
+            delete_action = menu.addAction("删除多边形\tCtrl+D")
+            if menu.exec_(global_pos) == delete_action:
+                self._delete_selected_polygon()
+
+    def _delete_selection(self):
+        if self.polygon_editor.selected_vertex_index is not None:
+            self._delete_selected_vertex()
+        else:
+            self._delete_selected_polygon()
 
     def _on_ep_class(self, idx):
         if self.engine.is_active:
@@ -693,7 +822,7 @@ class MainWindow(QMainWindow):
     def _cancel_line(self):
         if self.polygon_editor.is_dragging:
             self.polygon_editor.cancel_drag()
-            self.viewer.set_polygon_edit(self.polygon_editor.vertices)
+            self._show_polygon_selection()
             return
         self.engine.cancel()
         self.viewer.clear_stroke()
@@ -704,6 +833,37 @@ class MainWindow(QMainWindow):
     def _clear_polygon_selection(self):
         self.polygon_editor.clear()
         self.viewer.clear_polygon_edit()
+
+    def _delete_selected_polygon(self):
+        mask = self.state.mask_img
+        if (
+            self.state.tool != DrawTool.EDIT_POLY
+            or mask is None
+            or not self.polygon_editor.has_selection
+        ):
+            return
+        self.state.push_undo()
+        if not self.polygon_editor.delete(mask):
+            return
+        self.state.mark_modified()
+        self.viewer.clear_polygon_edit()
+        self._finish_stroke_update()
+
+    def _delete_selected_vertex(self):
+        mask = self.state.mask_img
+        if (
+            self.state.tool != DrawTool.EDIT_POLY
+            or mask is None
+            or self.polygon_editor.selected_vertex_index is None
+            or len(self.polygon_editor.vertices) <= 3
+        ):
+            return
+        self.state.push_undo()
+        self.polygon_editor.delete_selected_vertex()
+        self.state.mark_modified()
+        self.polygon_editor.apply(mask)
+        self._show_polygon_selection()
+        self._finish_stroke_update()
 
     # ──────────────────────────────────────────────────────────────────────────
     # 文件夹 & 图片
@@ -986,6 +1146,8 @@ class MainWindow(QMainWindow):
                 self._save_mask()
             elif mods == Qt.ControlModifier and key == Qt.Key_Z:
                 self._undo()
+            elif mods == Qt.ControlModifier and key == Qt.Key_D:
+                self._delete_selection()
             elif key == Qt.Key_Delete:
                 self._delete_current()
 
