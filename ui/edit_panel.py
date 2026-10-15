@@ -12,7 +12,13 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont
 
-from core.config import DrawTool, DEFAULT_BRUSH_LINE, DEFAULT_BRUSH_POLY, DEFAULT_BRUSH_ERASER
+from core.config import (
+    DrawTool,
+    DEFAULT_BRUSH_LINE,
+    DEFAULT_BRUSH_POLY,
+    DEFAULT_BRUSH_ERASER,
+    DEFAULT_FILL_TOLERANCE,
+)
 from ui.class_manager_dialog import ClassManagerDialog
 from ui.theme import THEMES, build_panel_style
 
@@ -60,6 +66,7 @@ def _sep():
 class EditPanel(QWidget):
     tool_changed = pyqtSignal(str)
     brush_changed = pyqtSignal(int)
+    similarity_changed = pyqtSignal(int)
     class_changed = pyqtSignal(int)
     alpha_changed = pyqtSignal(int)
     contour_changed = pyqtSignal(bool)
@@ -128,8 +135,15 @@ class EditPanel(QWidget):
         self.btn_edit_poly.setObjectName("toolBtn")
         self.btn_edit_poly.setCheckable(True)
         self.btn_edit_poly.setFixedHeight(38)
+        self.btn_auto_fill = QPushButton("▣  相似像素自动填充    [ 5 ]")
+        self.btn_auto_fill.setObjectName("toolBtn")
+        self.btn_auto_fill.setCheckable(True)
+        self.btn_auto_fill.setFixedHeight(38)
         grp = QButtonGroup(self)
-        for b in (self.btn_line, self.btn_poly, self.btn_eraser, self.btn_edit_poly):
+        for b in (
+            self.btn_line, self.btn_poly, self.btn_eraser,
+            self.btn_edit_poly, self.btn_auto_fill,
+        ):
             grp.addButton(b)
         self.btn_line.setChecked(True)
         self.btn_line.clicked.connect(lambda: self._on_tool(DrawTool.LINE))
@@ -138,12 +152,16 @@ class EditPanel(QWidget):
         self.btn_edit_poly.clicked.connect(
             lambda: self._on_tool(DrawTool.EDIT_POLY)
         )
+        self.btn_auto_fill.clicked.connect(
+            lambda: self._on_tool(DrawTool.AUTO_FILL)
+        )
         tool_row.addWidget(self.btn_line)
         tool_row.addWidget(self.btn_poly)
         tool_row.addWidget(self.btn_eraser)
         tool_row.addStretch()
         v.addLayout(tool_row)
         v.addWidget(self.btn_edit_poly)
+        v.addWidget(self.btn_auto_fill)
         self.lbl_polygon_hint = QLabel(
             "单击已有面状区域选中；拖动控制点改形，"
             "拖动区域内部整体移动；双击边线增加控制点；"
@@ -154,15 +172,33 @@ class EditPanel(QWidget):
         self.lbl_polygon_hint.setWordWrap(True)
         self.lbl_polygon_hint.hide()
         v.addWidget(self.lbl_polygon_hint)
+        self.lbl_auto_fill_hint = QLabel(
+            "单击原图中的一点，自动填充与该点颜色相近且相连的区域。"
+            "自动连接 1–2 像素细缝并填满内部空洞。"
+            "遇到已有标注停止扩张，不穿过或覆盖已有多边形。"
+            "单击已有多边形则按其原类别补齐内部空点、孔洞及细缝。"
+            "阈值越大，纳入的颜色范围越广；每次填充均可 Ctrl+Z 撤销。"
+        )
+        self.lbl_auto_fill_hint.setObjectName("statsLabel")
+        self.lbl_auto_fill_hint.setWordWrap(True)
+        self.lbl_auto_fill_hint.hide()
+        v.addWidget(self.lbl_auto_fill_hint)
 
         # ！！ 这里删除了原本所有的 line_hint 提示框相关的代码 ！！
 
         # §2 笔刷
         v.addWidget(_sep())
-        v.addWidget(self._section("BRUSH SIZE"))
+        self.lbl_size_section = self._section("BRUSH SIZE")
+        v.addWidget(self.lbl_size_section)
         self.slider_brush = LabeledSlider("笔刷", 1, 80, DEFAULT_BRUSH_LINE)
         self.slider_brush.valueChanged.connect(self.brush_changed)
         v.addWidget(self.slider_brush)
+        self.slider_similarity = LabeledSlider(
+            "色差阈值", 0, 100, DEFAULT_FILL_TOLERANCE, label_w=60, slider_w=122
+        )
+        self.slider_similarity.valueChanged.connect(self.similarity_changed)
+        self.slider_similarity.hide()
+        v.addWidget(self.slider_similarity)
 
         # §3 病害类别
         v.addWidget(_sep())
@@ -292,8 +328,13 @@ class EditPanel(QWidget):
 
     def _update_tool_controls(self, tool):
         editing_polygon = tool == DrawTool.EDIT_POLY
+        auto_filling = tool == DrawTool.AUTO_FILL
+        self.lbl_size_section.setText("PIXEL SIMILARITY" if auto_filling else "BRUSH SIZE")
+        self.slider_brush.setVisible(not auto_filling)
         self.slider_brush.setEnabled(not editing_polygon)
+        self.slider_similarity.setVisible(auto_filling)
         self.lbl_polygon_hint.setVisible(editing_polygon)
+        self.lbl_auto_fill_hint.setVisible(auto_filling)
 
     def _on_class_changed(self, idx):
         if 0 <= idx < len(self.state.classes):
@@ -407,12 +448,17 @@ class EditPanel(QWidget):
             self.btn_poly.setChecked(True)
         elif tool == DrawTool.ERASER:
             self.btn_eraser.setChecked(True)
-        else:
+        elif tool == DrawTool.EDIT_POLY:
             self.btn_edit_poly.setChecked(True)
+        elif tool == DrawTool.AUTO_FILL:
+            self.btn_auto_fill.setChecked(True)
         self._update_tool_controls(tool)
 
     def set_brush_value(self, value):
         self.slider_brush.setValue(value)
+
+    def set_similarity_value(self, value):
+        self.slider_similarity.setValue(value)
 
     def set_class_index(self, index):
         if 0 <= index < self.combo_class.count():

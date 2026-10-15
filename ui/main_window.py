@@ -13,11 +13,12 @@ from PyQt5.QtWidgets import (
     QMessageBox, QFrame, QApplication, QSizePolicy, QToolButton,
     QListView, QMenu
 )
-from PyQt5.QtCore import Qt, QRect, QPoint, QEvent
+from PyQt5.QtCore import Qt, QRect, QPoint, QEvent, QSettings
 from PyQt5.QtGui import QImage, QPixmap, QColor, QPalette, QFontMetrics, QFont, QScreen
 
 from core import (
-    AnnotationState, DrawEngine, DrawTool, PolygonEditor, VALID_IMAGE_EXTS
+    AnnotationState, DrawEngine, DrawTool, PolygonEditor, VALID_IMAGE_EXTS,
+    similarity_fill_target,
 )
 from utils import (imread_unicode, imwrite_unicode, scan_images,
                    find_mask_path, mask_save_path,
@@ -139,6 +140,7 @@ class MainWindow(QMainWindow):
         self.state  = AnnotationState()
         self.engine = DrawEngine(self.state)
         self.polygon_editor = PolygonEditor()
+        self._settings = QSettings("MaskAnnotator", "MaskAnnotator")
 
         self._last_pen_tool = DrawTool.LINE
         self._last_pen_size = 3
@@ -170,6 +172,7 @@ class MainWindow(QMainWindow):
         self._apply_theme()
         self._adapt_to_screen()
         self._update_resize_handles()
+        self._restore_folders()
 
     def _update_resize_handles(self):
         if not hasattr(self, "_resize_handles"):
@@ -504,6 +507,7 @@ class MainWindow(QMainWindow):
             ep = self.edit_panel
             ep.tool_changed.connect(self._on_tool_changed)
             ep.brush_changed.connect(self._on_brush_changed)
+            ep.similarity_changed.connect(self._on_similarity_changed)
             ep.class_changed.connect(self._on_ep_class)
             ep.alpha_changed.connect(lambda _: self._refresh_mask_overlay())
             ep.contour_changed.connect(lambda _: self._refresh_mask_overlay())
@@ -540,6 +544,9 @@ class MainWindow(QMainWindow):
     def _on_press(self, x, y):
         mask = self.state.mask_img
         if mask is None or not (0 <= x < mask.shape[1] and 0 <= y < mask.shape[0]):
+            return
+        if self.state.tool == DrawTool.AUTO_FILL:
+            self._auto_fill_at(int(x), int(y))
             return
         if self.state.tool == DrawTool.EDIT_POLY:
             scale = max(0.001, self.viewer.transform().m11())
@@ -621,6 +628,21 @@ class MainWindow(QMainWindow):
     def _on_hover(self, x, y):
         self._cursor_pos = (x, y)
 
+    def _auto_fill_at(self, x: int, y: int):
+        image = self.state.orig_img
+        mask = self.state.mask_img
+        if image is None or mask is None:
+            return
+        region, value = similarity_fill_target(
+            image, mask, x, y, self.state.current_draw_value, self.state.fill_tolerance
+        )
+        if not np.any(region & (mask != value)):
+            return
+        self.state.push_undo()
+        mask[region] = value
+        self.state.mark_modified()
+        self._finish_stroke_update()
+
     def _on_context_menu(self, x, y, global_pos):
         if (
             self.state.tool != DrawTool.EDIT_POLY
@@ -678,6 +700,9 @@ class MainWindow(QMainWindow):
         if was_active and self.edit_panel:
             self.edit_panel.set_undo_enabled(self.state.can_undo())
         self._update_dirty_indicator()
+
+    def _on_similarity_changed(self, value):
+        self.state.fill_tolerance = value
 
     def _refresh_stats(self):
         if self.edit_panel:
@@ -868,26 +893,34 @@ class MainWindow(QMainWindow):
     # ──────────────────────────────────────────────────────────────────────────
     # 文件夹 & 图片
     # ──────────────────────────────────────────────────────────────────────────
+    def _set_folder(self, name: str, folder: str):
+        folder = os.path.abspath(folder)
+        setattr(self, name, folder)
+        label = self.lbl_orig if name == "orig_folder" else self.lbl_mask_path
+        label.setText(f"📁 {os.path.basename(folder) or folder}")
+        label.setToolTip(folder)
+        t = THEMES[self._theme_name]
+        label.setStyleSheet(f"color:{t['text_accent']}; font-size:11px;")
+        self._settings.setValue(name, folder)
+        self._settings.sync()
+
+    def _restore_folders(self):
+        for name in ("orig_folder", "mask_folder"):
+            folder = self._settings.value(name, "", type=str)
+            if folder and os.path.isdir(folder):
+                self._set_folder(name, folder)
+        self._scan_images()
+
     def _load_orig_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "选择原图文件夹")
         if folder and self._confirm_save_if_dirty():
-            self.orig_folder = folder
-            short = os.path.basename(folder)
-            self.lbl_orig.setText(f"📁 {short}")
-            self.lbl_orig.setToolTip(folder)
-            t = THEMES[self._theme_name]
-            self.lbl_orig.setStyleSheet(f"color:{t['text_accent']}; font-size:11px;")
+            self._set_folder("orig_folder", folder)
             self._scan_images()
 
     def _load_mask_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "选择掩膜文件夹")
         if folder and self._confirm_save_if_dirty():
-            self.mask_folder = folder
-            short = os.path.basename(folder)
-            self.lbl_mask_path.setText(f"📁 {short}")
-            self.lbl_mask_path.setToolTip(folder)
-            t = THEMES[self._theme_name]
-            self.lbl_mask_path.setStyleSheet(f"color:{t['text_accent']}; font-size:11px;")
+            self._set_folder("mask_folder", folder)
             self._scan_images()
 
     def _scan_images(self):
@@ -898,6 +931,13 @@ class MainWindow(QMainWindow):
         self.spin_jump.setMaximum(max(1, total))
         if self.image_files:
             self.current_index = 0
+            last_image_path = self._settings.value("last_image_path", "", type=str)
+            if last_image_path and os.path.isfile(last_image_path):
+                last_filename = os.path.basename(last_image_path)
+                if (os.path.normcase(os.path.dirname(last_image_path))
+                        == os.path.normcase(os.path.abspath(self.orig_folder))
+                        and last_filename in self.image_files):
+                    self.current_index = self.image_files.index(last_filename)
             self._load_current_image()
         else:
             self.current_index = -1
@@ -983,6 +1023,9 @@ class MainWindow(QMainWindow):
             f"color:{ t['status_ok'] if has_mask else t['text_muted'] }; font-size:11px;")
         self.setWindowTitle(f"Mask Annotator  ·  {filename}")
         self._refresh_display(reset_zoom=True)
+        self._settings.setValue(
+            "last_image_path", os.path.abspath(os.path.join(self.orig_folder, filename)))
+        self._settings.sync()
 
     # ──────────────────────────────────────────────────────────────────────────
     # 保存 & 删除
@@ -995,9 +1038,7 @@ class MainWindow(QMainWindow):
             folder = QFileDialog.getExistingDirectory(self, "选择掩膜保存文件夹")
             if not folder:
                 return False
-            self.mask_folder = folder
-            self.lbl_mask_path.setText(f"📁 {os.path.basename(folder)}")
-            self.lbl_mask_path.setToolTip(folder)
+            self._set_folder("mask_folder", folder)
         filename  = self.image_files[self.current_index]
         save_path = mask_save_path(self.mask_folder, filename)
         if imwrite_unicode(save_path, self.state.mask_img):
@@ -1127,6 +1168,14 @@ class MainWindow(QMainWindow):
                 self.state.tool = DrawTool.EDIT_POLY
                 self.viewer.update_cursor_state(self.state.tool, self.state.brush_size)
 
+            elif ep_on and not (mods & Qt.AltModifier) and key == Qt.Key_5:
+                self.engine.cancel()
+                self.viewer.clear_stroke()
+                self._clear_polygon_selection()
+                self.edit_panel.set_tool_btn(DrawTool.AUTO_FILL)
+                self.state.tool = DrawTool.AUTO_FILL
+                self.viewer.update_cursor_state(self.state.tool, self.state.brush_size)
+
             elif key in (Qt.Key_Return, Qt.Key_Enter):
                 if self.state.tool == DrawTool.LINE:
                     self._commit_line()
@@ -1136,8 +1185,12 @@ class MainWindow(QMainWindow):
                 self.viewer.fit_image()
             elif ep_on and key in (Qt.Key_BracketLeft, Qt.Key_BracketRight):
                 delta = -1 if key == Qt.Key_BracketLeft else 1
-                self.edit_panel.set_brush_value(
-                    max(1, min(80, self.state.brush_size + delta)))
+                if self.state.tool == DrawTool.AUTO_FILL:
+                    self.edit_panel.set_similarity_value(
+                        max(0, min(100, self.state.fill_tolerance + delta)))
+                else:
+                    self.edit_panel.set_brush_value(
+                        max(1, min(80, self.state.brush_size + delta)))
             elif ep_on and (mods & Qt.AltModifier) and Qt.Key_1 <= key <= Qt.Key_9:
                 idx = key - Qt.Key_1
                 if idx < len(self.state.classes):

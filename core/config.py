@@ -28,6 +28,7 @@ class DrawTool:
     POLY   = "poly"    # 面状笔（fillPoly）
     ERASER = "eraser"  # 橡皮擦
     EDIT_POLY = "edit_poly"  # 从现有栅格掩膜重建并编辑多边形
+    AUTO_FILL = "auto_fill"  # 按原图像素相似度填充连通区域
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 应用全局设置
@@ -37,5 +38,6 @@ DEFAULT_ALPHA     = 50   # 掩膜默认透明度 (0-100)
 DEFAULT_BRUSH_LINE   = 3    # 线状笔默认宽度（像素）
 DEFAULT_BRUSH_POLY   = 1    # 面状笔默认宽度
 DEFAULT_BRUSH_ERASER = 20   # 橡皮擦默认宽度
+DEFAULT_FILL_TOLERANCE = 20  # 自动填充：相对种子像素的单通道色差阈值
 
 VALID_IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff')

@@ -6,7 +6,7 @@ UI 层只通过此对象读写数据，不直接操作 numpy 数组。
 """
 import copy
 import numpy as np
-from core.config import DEFAULT_CLASSES, MAX_UNDO, DrawTool
+from core.config import DEFAULT_CLASSES, DEFAULT_FILL_TOLERANCE, MAX_UNDO, DrawTool
 
 
 class AnnotationState:
@@ -37,6 +37,7 @@ class AnnotationState:
         # 工具状态
         self.tool: str = DrawTool.LINE
         self.brush_size: int = 3
+        self.fill_tolerance: int = DEFAULT_FILL_TOLERANCE
         self.is_mask_visible: bool = True
         self.show_all_classes: bool = True
         self.show_contour: bool = True
