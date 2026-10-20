@@ -280,14 +280,14 @@ QPushButton#maskBtn:checked {{
     border-color: {t['border_accent']};
     color: {t['text_accent']};
 }}
-QPushButton#themeBtn {{
+QPushButton#themeBtn, QPushButton#settingsBtn {{
     background: transparent;
     color: {t['text_secondary']};
     border: 1px solid {t['border']};
     font-size: 11px;
     padding: 5px 10px;
 }}
-QPushButton#themeBtn:hover {{
+QPushButton#themeBtn:hover, QPushButton#settingsBtn:hover {{
     background: {t['bg_hover']};
     color: {t['text_primary']};
 }}

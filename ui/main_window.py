@@ -21,11 +21,12 @@ from core import (
     similarity_fill_target,
 )
 from utils import (imread_unicode, imwrite_unicode, scan_images,
-                   find_mask_path, mask_save_path,
+                   find_mask_paths, mask_save_path, MaskIndex,
                    mask_to_overlay_rgba, adjust_brightness_contrast,
                    class_pixel_stats_str)
 from ui.graphics_view import InteractiveGraphicsView
 from ui.edit_panel import EditPanel
+from ui.settings_dialog import SettingsDialog, IMAGE_FILTER_OPTIONS
 from ui.theme import THEMES, build_main_style
 
 
@@ -141,6 +142,13 @@ class MainWindow(QMainWindow):
         self.engine = DrawEngine(self.state)
         self.polygon_editor = PolygonEditor()
         self._settings = QSettings("MaskAnnotator", "MaskAnnotator")
+        self.recursive_search = self._settings.value("recursive_search", False, type=bool)
+        self.preserve_mask_structure = self._settings.value(
+            "preserve_mask_structure", False, type=bool)
+        self.image_filter = self._settings.value("image_filter", "all", type=str)
+        if self.image_filter not in dict(IMAGE_FILTER_OPTIONS):
+            self.image_filter = "all"
+        self._mask_index = None
 
         self._last_pen_tool = DrawTool.LINE
         self._last_pen_size = 3
@@ -148,6 +156,7 @@ class MainWindow(QMainWindow):
         self.orig_folder:  str       = ""
         self.mask_folder:  str       = ""
         self.image_files:  list[str] = []
+        self._all_image_files: list[str] = []
         self.current_index: int      = -1
         self._cursor_pos             = None
         self.edit_panel: EditPanel | None = None
@@ -286,6 +295,10 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.lbl_mask_path)
 
         tb.addStretch()
+
+        self.btn_settings = _btn("⚙  设置", "settingsBtn", tooltip="文件查找与掩膜保存设置")
+        self.btn_settings.clicked.connect(self._open_settings)
+        tb.addWidget(self.btn_settings)
 
         # 主题切换
         self.btn_theme = _btn("☀  日间模式", "themeBtn", tooltip="切换亮色/暗色主题")
@@ -732,7 +745,7 @@ class MainWindow(QMainWindow):
         else:
             has_mask = bool(
                 self.mask_folder
-                and find_mask_path(self.mask_folder, filename, VALID_IMAGE_EXTS)
+                and self._find_mask_paths(filename)
             )
             t = THEMES[self._theme_name]
             self.lbl_status.setText(
@@ -893,6 +906,50 @@ class MainWindow(QMainWindow):
     # ──────────────────────────────────────────────────────────────────────────
     # 文件夹 & 图片
     # ──────────────────────────────────────────────────────────────────────────
+    def _open_settings(self):
+        dialog = SettingsDialog(self.recursive_search, self.preserve_mask_structure,
+                                self._theme_name, self, image_filter=self.image_filter)
+
+        def save():
+            if self._apply_folder_settings(*dialog.values()):
+                dialog.accept()
+
+        dialog.save_requested.connect(save)
+        dialog.exec_()
+        dialog.deleteLater()
+
+    def _apply_folder_settings(self, recursive_search, preserve_mask_structure,
+                               image_filter=None):
+        image_filter = self.image_filter if image_filter is None else image_filter
+        if image_filter not in dict(IMAGE_FILTER_OPTIONS):
+            image_filter = "all"
+        if (recursive_search, preserve_mask_structure, image_filter) == (
+                self.recursive_search, self.preserve_mask_structure, self.image_filter):
+            return True
+        if not self._confirm_save_if_dirty():
+            return False
+        self.recursive_search = recursive_search
+        self.preserve_mask_structure = preserve_mask_structure
+        self.image_filter = image_filter
+        self._settings.setValue("recursive_search", recursive_search)
+        self._settings.setValue("preserve_mask_structure", preserve_mask_structure)
+        self._settings.setValue("image_filter", image_filter)
+        self._settings.sync()
+        self._scan_images()
+        return True
+
+    def _rebuild_mask_index(self):
+        self._mask_index = (MaskIndex(self.mask_folder, VALID_IMAGE_EXTS,
+                                      self.recursive_search)
+                            if self.mask_folder else None)
+
+    def _find_mask_paths(self, filename):
+        if not self.mask_folder:
+            return []
+        return find_mask_paths(self.mask_folder, filename, VALID_IMAGE_EXTS,
+                               self.recursive_search, self.preserve_mask_structure,
+                               self._mask_index)
+
     def _set_folder(self, name: str, folder: str):
         folder = os.path.abspath(folder)
         setattr(self, name, folder)
@@ -924,55 +981,100 @@ class MainWindow(QMainWindow):
             self._scan_images()
 
     def _scan_images(self):
+        self._rebuild_mask_index()
         if not self.orig_folder:
             return
-        self.image_files = scan_images(self.orig_folder, VALID_IMAGE_EXTS)
+        self._all_image_files = scan_images(
+            self.orig_folder, VALID_IMAGE_EXTS, self.recursive_search)
+        self._update_image_list()
+
+    def _update_image_list(self, preferred_filename=None, fallback_index=0):
+        if self.image_filter == "all":
+            self.image_files = self._all_image_files.copy()
+        else:
+            want_mask = self.image_filter == "with_mask"
+            self.image_files = [filename for filename in self._all_image_files
+                                if bool(self._find_mask_paths(filename)) == want_mask]
         total = len(self.image_files)
         self.spin_jump.setMaximum(max(1, total))
         if self.image_files:
-            self.current_index = 0
+            self.current_index = max(0, min(fallback_index, total - 1))
             last_image_path = self._settings.value("last_image_path", "", type=str)
-            if last_image_path and os.path.isfile(last_image_path):
-                last_filename = os.path.basename(last_image_path)
-                if (os.path.normcase(os.path.dirname(last_image_path))
-                        == os.path.normcase(os.path.abspath(self.orig_folder))
-                        and last_filename in self.image_files):
-                    self.current_index = self.image_files.index(last_filename)
+            if preferred_filename is not None:
+                last_filename = os.path.normcase(preferred_filename)
+            elif last_image_path and os.path.isfile(last_image_path):
+                try:
+                    last_filename = os.path.normcase(os.path.relpath(
+                        last_image_path, self.orig_folder))
+                except ValueError:  # 上次图像位于另一盘符。
+                    last_filename = None
+            else:
+                last_filename = None
+            for index, filename in enumerate(self.image_files):
+                if os.path.normcase(filename) == last_filename:
+                    self.current_index = index
+                    break
             self._load_current_image()
         else:
             self.current_index = -1
+            self.engine.cancel()
+            self._clear_polygon_selection()
             self.state.orig_img = None
             self.state.mask_img = None
+            self.state.undo_stack.clear()
+            self.state.mark_saved()
             self.viewer.clear_image()
             self.lbl_info.setText("—  /  —")
-            self.lbl_status.setText("所选原图文件夹中没有可支持的图像")
+            if not self._all_image_files:
+                message = "所选原图文件夹中没有可支持的图像"
+            elif self.image_filter == "with_mask" and not self.mask_folder:
+                message = "请选择掩膜文件夹，以筛选有掩膜的图片"
+            else:
+                message = "没有符合当前显示范围的图片，可在设置中切换为全部图片"
+            self.lbl_status.setText(message)
+            self.lbl_status.setStyleSheet(
+                f"color:{THEMES[self._theme_name]['text_muted']}; font-size:11px;")
+            self.setWindowTitle("Mask Annotator")
             self.btn_prev.setEnabled(False)
             self.btn_next.setEnabled(False)
             self.btn_save_next.setEnabled(False)
             self.btn_delete.setEnabled(False)
+            if self.edit_panel:
+                self.edit_panel.set_undo_enabled(False)
+                self.edit_panel.set_stats("")
+
+    def _navigate_to(self, filename):
+        # 保存可能使当前图片离开“无掩膜”列表，按文件名定位以免跳过下一张。
+        if filename in self.image_files:
+            index = self.image_files.index(filename)
+            if index != self.current_index:
+                self.current_index = index
+                self._load_current_image()
 
     def _jump_to(self):
         idx = self.spin_jump.value() - 1
-        if (0 <= idx < len(self.image_files) and idx != self.current_index
-                and self._confirm_save_if_dirty()):
-            self.current_index = idx
-            self._load_current_image()
+        if 0 <= idx < len(self.image_files) and idx != self.current_index:
+            filename = self.image_files[idx]
+            if self._confirm_save_if_dirty():
+                self._navigate_to(filename)
 
     def _prev_image(self):
-        if self.current_index > 0 and self._confirm_save_if_dirty():
-            self.current_index -= 1
-            self._load_current_image()
+        if self.current_index > 0:
+            filename = self.image_files[self.current_index - 1]
+            if self._confirm_save_if_dirty():
+                self._navigate_to(filename)
 
     def _next_image(self):
-        if (self.current_index < len(self.image_files) - 1
-                and self._confirm_save_if_dirty()):
-            self.current_index += 1
-            self._load_current_image()
+        if 0 <= self.current_index < len(self.image_files) - 1:
+            filename = self.image_files[self.current_index + 1]
+            if self._confirm_save_if_dirty():
+                self._navigate_to(filename)
 
     def _save_and_next(self):
-        if self._save_mask() and self.current_index < len(self.image_files) - 1:
-            self.current_index += 1
-            self._load_current_image()
+        next_filename = (self.image_files[self.current_index + 1]
+                         if 0 <= self.current_index < len(self.image_files) - 1 else None)
+        if self._save_mask() and next_filename is not None:
+            self._navigate_to(next_filename)
 
     def _load_current_image(self):
         filename = self.image_files[self.current_index]
@@ -989,7 +1091,8 @@ class MainWindow(QMainWindow):
 
         mask_img = None
         if self.mask_folder:
-            mp = find_mask_path(self.mask_folder, filename, VALID_IMAGE_EXTS)
+            paths = self._find_mask_paths(filename)
+            mp = paths[0] if paths else None
             if mp:
                 loaded = imread_unicode(mp, cv2.IMREAD_GRAYSCALE)
                 if loaded is not None:
@@ -1039,9 +1142,13 @@ class MainWindow(QMainWindow):
             if not folder:
                 return False
             self._set_folder("mask_folder", folder)
+            self._rebuild_mask_index()
         filename  = self.image_files[self.current_index]
-        save_path = mask_save_path(self.mask_folder, filename)
+        save_path = mask_save_path(
+            self.mask_folder, filename, self.preserve_mask_structure)
         if imwrite_unicode(save_path, self.state.mask_img):
+            if self._mask_index is not None:
+                self._mask_index.add(save_path)
             self.state.mark_saved()
             stats = self.state.class_pixel_stats()
             s     = ", ".join(f"{n}:{c}px" for n, c in stats) or "全背景"
@@ -1052,6 +1159,8 @@ class MainWindow(QMainWindow):
                 f"color:{t['status_ok']}; font-size:11px;")
             self.setWindowTitle(
                 f"Mask Annotator  ·  {filename}  ✓")
+            if self.image_filter != "all":
+                self._update_image_list(filename, self.current_index)
             return True
         QMessageBox.critical(self, "保存失败", f"无法写入:\n{save_path}")
         return False
@@ -1075,30 +1184,16 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "删除失败", str(e)); return
 
         if self.mask_folder:
-            base = os.path.splitext(filename)[0]
-            for ext in VALID_IMAGE_EXTS:
-                for suf in ('', '_mask'):
-                    p = os.path.join(self.mask_folder, f"{base}{suf}{ext}")
-                    try:
-                        if os.path.exists(p): os.remove(p)
-                    except Exception:
-                        pass
+            for path in self._find_mask_paths(filename):
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except Exception:
+                    pass
+            self._rebuild_mask_index()
 
-        self.image_files.pop(self.current_index)
-        if not self.image_files:
-            self.state.orig_img = None
-            self.state.mask_img = None
-            self.lbl_info.setText("—  /  —")
-            self.viewer.clear_image()
-            self.btn_delete.setEnabled(False)
-            self.btn_prev.setEnabled(False)
-            self.btn_next.setEnabled(False)
-            self.btn_save_next.setEnabled(False)
-            self.lbl_status.setText("文件夹已清空")
-        else:
-            if self.current_index >= len(self.image_files):
-                self.current_index = len(self.image_files) - 1
-            self._load_current_image()
+        self._all_image_files = [path for path in self._all_image_files if path != filename]
+        self._update_image_list(filename, self.current_index)
 
     # ──────────────────────────────────────────────────────────────────────────
     # 快捷键
