@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (
     QListView, QMenu
 )
 from PyQt5.QtCore import Qt, QRect, QPoint, QEvent, QSettings
-from PyQt5.QtGui import QImage, QPixmap, QColor, QPalette, QFontMetrics, QFont, QScreen
+from PyQt5.QtGui import QImage, QPixmap, QColor, QPalette, QFontMetrics, QFont, QScreen, QPainter
 
 from core import (
     AnnotationState, DrawEngine, DrawTool, PolygonEditor, VALID_IMAGE_EXTS,
@@ -44,6 +44,30 @@ def _hline():
     f.setObjectName("hline")
     f.setFrameShape(QFrame.HLine)
     return f
+
+
+class ElidedLabel(QLabel):
+    """按可用宽度省略文字，完整内容保留在提示中，不参与横向挤占。"""
+
+    def __init__(self, text="", elide_mode=Qt.ElideRight):
+        super().__init__(text)
+        self._elide_mode = elide_mode
+        self.setTextFormat(Qt.PlainText)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.setToolTip(text)
+
+    def setText(self, text):
+        super().setText(text)
+        self.setToolTip(text)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setClipRect(self.contentsRect())
+        painter.setPen(self.palette().color(QPalette.WindowText))
+        text = self.fontMetrics().elidedText(
+            self.text(), self._elide_mode, self.contentsRect().width())
+        painter.drawText(self.contentsRect(), int(self.alignment()), text)
+
 
 class ResizeHandle(QWidget):
     """无边框窗口的透明边缘拖动区域。"""
@@ -367,10 +391,9 @@ class MainWindow(QMainWindow):
         self.btn_prev.setEnabled(False)
         self.btn_prev.clicked.connect(self._prev_image)
 
-        self.lbl_info = QLabel("—  /  —")
+        self.lbl_info = ElidedLabel("—  /  —", Qt.ElideMiddle)
         self.lbl_info.setObjectName("infoLabel")
         self.lbl_info.setAlignment(Qt.AlignCenter)
-        self.lbl_info.setMinimumWidth(200)
 
         self.btn_next = _btn("下一张  ▶", "navBtn", tooltip="下一张 (→)")
         self.btn_next.setFixedWidth(96)
@@ -394,18 +417,19 @@ class MainWindow(QMainWindow):
         btn_go.clicked.connect(self._jump_to)
 
         bl.addWidget(self.btn_prev)
-        bl.addWidget(self.lbl_info)
+        # 文件名和状态按 2:1 分配剩余空间，宽度只随窗口变化。
+        bl.addWidget(self.lbl_info, 2)
         bl.addWidget(self.btn_next)
         bl.addWidget(self.btn_save_next)
         bl.addSpacing(20)
         bl.addWidget(lbl_jump)
         bl.addWidget(self.spin_jump)
         bl.addWidget(btn_go)
-        bl.addStretch()
 
-        self.lbl_status = QLabel("")
+        self.lbl_status = ElidedLabel("")
         self.lbl_status.setObjectName("statusLabel")
-        bl.addWidget(self.lbl_status)
+        self.lbl_status.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        bl.addWidget(self.lbl_status, 1)
 
         bl.addSpacing(20)
 
@@ -441,6 +465,11 @@ class MainWindow(QMainWindow):
                     }}
                     QLabel {{
                         font-family: "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+                    }}
+                    QToolTip {{
+                        font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+                        font-size: 16px;
+                        padding: 8px 12px;
                     }}
 
                     QWidget#topBar {{

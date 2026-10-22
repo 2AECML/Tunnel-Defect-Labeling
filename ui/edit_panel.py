@@ -81,8 +81,8 @@ class EditPanel(QWidget):
     _drag_pos = None
 
     def __init__(self, state, theme_name="light", parent=None):
-        super().__init__(parent,
-                         Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        # 从属工具窗口只保持在所属主窗口上方，不对其他应用全局置顶。
+        super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint)
         self.state = state
         self._theme_name = theme_name
         self.setFixedWidth(310)
