@@ -363,8 +363,7 @@ def test_filter_change_cancel_keeps_images_and_preference(windows, tmp_path, mon
 def test_delete_updates_filtered_count_and_preserves_hidden_images(windows, tmp_path, monkeypatch):
     window, masks = _filter_window(windows, tmp_path, mask_names=("a", "c"))
     window._apply_folder_settings(False, False, "with_mask")
-    monkeypatch.setattr(main_window.QMessageBox, "question",
-                        lambda *args: main_window.QMessageBox.Yes)
+    monkeypatch.setattr(main_window, "confirm_delete", lambda *args: True)
     window._delete_current()
     assert window.image_files == ["c.jpg"]
     assert window.spin_jump.maximum() == 1

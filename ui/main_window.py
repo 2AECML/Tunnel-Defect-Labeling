@@ -27,6 +27,7 @@ from utils import (imread_unicode, imwrite_unicode, scan_images,
 from ui.graphics_view import InteractiveGraphicsView
 from ui.edit_panel import EditPanel
 from ui.settings_dialog import SettingsDialog, IMAGE_FILTER_OPTIONS
+from ui.delete_confirmation import confirm_delete
 from ui.theme import THEMES, build_main_style
 
 
@@ -433,9 +434,16 @@ class MainWindow(QMainWindow):
 
         bl.addSpacing(20)
 
-        self.btn_delete = _btn("🗑  删除", "deleteBtn",
+        self.btn_delete_mask = _btn("删除掩膜", "deleteBtn",
+                                   tooltip="仅删除当前图像的掩膜文件，保留原图")
+        self.btn_delete_mask.setFixedWidth(100)
+        self.btn_delete_mask.setEnabled(False)
+        self.btn_delete_mask.clicked.connect(self._delete_current_mask)
+        bl.addWidget(self.btn_delete_mask)
+
+        self.btn_delete = _btn("删除图像与掩膜", "deleteBtn",
                                tooltip="删除当前图及掩膜 (Del)")
-        self.btn_delete.setFixedWidth(84)
+        self.btn_delete.setFixedWidth(132)
         self.btn_delete.setEnabled(False)
         self.btn_delete.clicked.connect(self._delete_current)
         bl.addWidget(self.btn_delete)
@@ -1067,6 +1075,7 @@ class MainWindow(QMainWindow):
             self.btn_prev.setEnabled(False)
             self.btn_next.setEnabled(False)
             self.btn_save_next.setEnabled(False)
+            self.btn_delete_mask.setEnabled(False)
             self.btn_delete.setEnabled(False)
             if self.edit_panel:
                 self.edit_panel.set_undo_enabled(False)
@@ -1105,7 +1114,7 @@ class MainWindow(QMainWindow):
         if self._save_mask() and next_filename is not None:
             self._navigate_to(next_filename)
 
-    def _load_current_image(self):
+    def _load_current_image(self, reset_zoom=True):
         filename = self.image_files[self.current_index]
         total    = len(self.image_files)
         self.lbl_info.setText(
@@ -1131,10 +1140,12 @@ class MainWindow(QMainWindow):
                                             interpolation=cv2.INTER_NEAREST)
                     mask_img = loaded
 
+        self.engine.cancel()
+        self.viewer.clear_stroke()
         self.state.load_image_and_mask(orig_img, mask_img)
         self._clear_polygon_selection()
-        self.engine.cancel()
         self.btn_delete.setEnabled(True)
+        self._update_delete_mask_button()
         self.btn_prev.setEnabled(self.current_index > 0)
         self.btn_next.setEnabled(self.current_index < total - 1)
         self.btn_save_next.setEnabled(True)
@@ -1154,7 +1165,7 @@ class MainWindow(QMainWindow):
         self.lbl_status.setStyleSheet(
             f"color:{ t['status_ok'] if has_mask else t['text_muted'] }; font-size:11px;")
         self.setWindowTitle(f"Mask Annotator  ·  {filename}")
-        self._refresh_display(reset_zoom=True)
+        self._refresh_display(reset_zoom=reset_zoom)
         self._settings.setValue(
             "last_image_path", os.path.abspath(os.path.join(self.orig_folder, filename)))
         self._settings.sync()
@@ -1178,6 +1189,7 @@ class MainWindow(QMainWindow):
         if imwrite_unicode(save_path, self.state.mask_img):
             if self._mask_index is not None:
                 self._mask_index.add(save_path)
+            self._update_delete_mask_button()
             self.state.mark_saved()
             stats = self.state.class_pixel_stats()
             s     = ", ".join(f"{n}:{c}px" for n, c in stats) or "全背景"
@@ -1194,35 +1206,105 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "保存失败", f"无法写入:\n{save_path}")
         return False
 
+    def _update_delete_mask_button(self):
+        enabled = (
+            0 <= self.current_index < len(self.image_files)
+            and self.state.orig_img is not None
+            and any(os.path.isfile(path) for path in
+                    self._find_mask_paths(self.image_files[self.current_index]))
+        )
+        self.btn_delete_mask.setEnabled(enabled)
+
+    def _delete_mask_files(self, paths):
+        """逐个删除已确认的掩膜，报告失败路径并刷新文件索引。"""
+        errors = []
+        for path in paths:
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                errors.append(f"{path}\n{exc}")
+        self._rebuild_mask_index()
+        self._update_delete_mask_button()
+        return errors
+
+    def _delete_current_mask(self):
+        if not (0 <= self.current_index < len(self.image_files)):
+            return
+        filename = self.image_files[self.current_index]
+        paths = [path for path in self._find_mask_paths(filename) if os.path.isfile(path)]
+        if not paths:
+            self._rebuild_mask_index()
+            self._update_delete_mask_button()
+            return
+
+        orig_path = os.path.join(self.orig_folder, filename)
+        try:
+            matches_original = any(os.path.samefile(path, orig_path) for path in paths)
+        except OSError as exc:
+            QMessageBox.critical(self, "无法删除掩膜", f"无法核对原图与掩膜文件：\n{exc}")
+            return
+        if matches_original:
+            QMessageBox.warning(self, "无法删除掩膜",
+                                "匹配的掩膜文件与当前原图是同一个文件，请选择独立的掩膜目录。")
+            return
+        text = "保留原图，永久删除当前图像的以下掩膜文件？\n\n" + "\n".join(paths)
+        if self.state.is_dirty:
+            text += "\n\n当前未保存的标注也将被清除。"
+        text += "\n\n文件删除后不可恢复。"
+        if not confirm_delete(self, "mask_only", "确认删除掩膜", text):
+            return
+
+        errors = self._delete_mask_files(paths)
+        if errors:
+            QMessageBox.critical(self, "掩膜删除未完成",
+                                 "以下掩膜文件未能删除，当前编辑内容已保留：\n\n" + "\n\n".join(errors))
+            return
+
+        self.engine.cancel()
+        self.viewer.clear_stroke()
+        if self.image_filter == "with_mask":
+            self._update_image_list(filename, self.current_index)
+        elif self._find_mask_paths(filename):
+            # 原匹配目录删除后，可能还有按既有查找规则匹配到的其他掩膜。
+            self._load_current_image(reset_zoom=False)
+        elif self.state.orig_img is not None:
+            self.state.load_image_and_mask(self.state.orig_img, None)
+            self._clear_polygon_selection()
+            if self.edit_panel:
+                self.edit_panel.set_undo_enabled(False)
+            self._refresh_mask_overlay()
+            self._refresh_stats()
+            self._update_dirty_indicator()
+            self._update_delete_mask_button()
+
     def _delete_current(self):
-        if not self.image_files or self.current_index < 0:
+        if not (0 <= self.current_index < len(self.image_files)):
             return
         filename  = self.image_files[self.current_index]
         orig_path = os.path.join(self.orig_folder, filename)
-        reply = QMessageBox.question(
-            self, "确认删除",
-            f"永久删除以下文件及其掩膜？\n\n  {filename}\n\n此操作不可恢复。",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-        )
-        if reply != QMessageBox.Yes:
+        paths = self._find_mask_paths(filename)
+        text = "永久删除以下原图及其匹配的掩膜文件？\n\n" + "\n".join([orig_path, *paths])
+        if self.state.is_dirty:
+            text += "\n\n当前未保存的标注也将被清除。"
+        text += "\n\n此操作不可恢复。"
+        if not confirm_delete(self, "image_and_mask", "确认删除图像与掩膜", text):
             return
         try:
-            if os.path.exists(orig_path):
-                os.remove(orig_path)
-        except Exception as e:
-            QMessageBox.critical(self, "删除失败", str(e)); return
+            os.remove(orig_path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            QMessageBox.critical(self, "删除失败", str(exc))
+            return
 
-        if self.mask_folder:
-            for path in self._find_mask_paths(filename):
-                try:
-                    if os.path.exists(path):
-                        os.remove(path)
-                except Exception:
-                    pass
-            self._rebuild_mask_index()
-
+        errors = self._delete_mask_files(paths)
         self._all_image_files = [path for path in self._all_image_files if path != filename]
         self._update_image_list(filename, self.current_index)
+        if errors:
+            QMessageBox.critical(self, "掩膜删除未完成",
+                                 "原图已删除，但以下掩膜文件未能删除：\n\n" + "\n\n".join(errors))
 
     # ──────────────────────────────────────────────────────────────────────────
     # 快捷键
