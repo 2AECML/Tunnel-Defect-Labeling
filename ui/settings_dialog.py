@@ -1,12 +1,18 @@
 """文件查找与掩膜保存偏好设置。"""
 
 from PyQt5.QtCore import Qt, QRectF, QSize, pyqtSignal
-from PyQt5.QtGui import QColor, QPainter, QPen
+from PyQt5.QtGui import QColor, QPainter, QPen, QKeySequence
 from PyQt5.QtWidgets import (
-    QButtonGroup, QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout,
+    QButtonGroup, QCheckBox, QDialog, QFrame, QHBoxLayout, QKeySequenceEdit,
+    QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
-from ui.theme import THEMES
+from ui.theme import THEMES, build_control_style
+from ui.styled_controls import ThemedComboBox
+from ui.overlay_shortcut import (
+    DEFAULT_OVERLAY_SHORTCUT, DEFAULT_OVERLAY_SHORTCUT_MODE,
+    OVERLAY_SHORTCUT_MODES, shortcut_error,
+)
 
 IMAGE_FILTER_OPTIONS = (
     ("all", "全部图片"),
@@ -51,23 +57,34 @@ class SettingsDialog(QDialog):
     save_requested = pyqtSignal()
 
     def __init__(self, recursive_search=False, preserve_mask_structure=False,
-                 theme_name="light", parent=None, image_filter="all"):
+                 theme_name="light", parent=None, image_filter="all",
+                 mask_shortcut_mode=DEFAULT_OVERLAY_SHORTCUT_MODE,
+                 mask_shortcut=DEFAULT_OVERLAY_SHORTCUT):
         super().__init__(parent)
         self.setWindowTitle("设置")
         self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
         self.setObjectName("settingsDialog")
         self.setMinimumWidth(520)
-        self.resize(560, 600)
+        self.setMinimumHeight(360)
+        self.resize(600, min(760, max(360, self.screen().availableGeometry().height() - 70)))
         t = THEMES[theme_name]
         self.setStyleSheet(self._style(t))
 
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        content = QWidget()
+        scroll.setWidget(content)
+        outer.addWidget(scroll, 1)
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(28, 24, 28, 22)
         layout.setSpacing(10)
         title = QLabel("设置")
         title.setObjectName("settingsTitle")
         layout.addWidget(title)
-        subtitle = QLabel("管理文件查找与掩膜保存方式")
+        subtitle = QLabel("管理文件查找、掩膜保存与快捷键")
         subtitle.setObjectName("settingsSubtitle")
         layout.addWidget(subtitle)
         layout.addSpacing(12)
@@ -131,10 +148,49 @@ class SettingsDialog(QDialog):
         self.chk_preserve_structure.toggled.connect(self._update_preview)
         self._update_preview()
         layout.addWidget(save_card)
+
+        layout.addSpacing(8)
+        layout.addWidget(self._section_label("掩膜叠加快捷键"))
+        shortcut_card, shortcut_layout = self._card()
+        self.combo_mask_shortcut_mode = ThemedComboBox()
+        for value, text in OVERLAY_SHORTCUT_MODES:
+            self.combo_mask_shortcut_mode.addItem(text, value)
+        index = self.combo_mask_shortcut_mode.findData(mask_shortcut_mode)
+        self.combo_mask_shortcut_mode.setCurrentIndex(max(0, index))
+        self.combo_mask_shortcut_mode.setMinimumWidth(140)
+        shortcut_layout.addLayout(self._option_row(
+            "触发模式", "长按时临时反转，松开恢复；点击时切换后保持。",
+            self.combo_mask_shortcut_mode))
+        binding_row = QHBoxLayout()
+        binding_label = QLabel("快捷键")
+        binding_label.setObjectName("settingsOption")
+        binding_row.addWidget(binding_label)
+        binding_row.addStretch()
+        self.key_mask_shortcut = QKeySequenceEdit(QKeySequence(mask_shortcut))
+        self.key_mask_shortcut.setAccessibleName("掩膜叠加快捷键")
+        self.key_mask_shortcut.setFixedWidth(180)
+        binding_label.setBuddy(self.key_mask_shortcut)
+        binding_row.addWidget(self.key_mask_shortcut)
+        self.btn_reset_shortcut = QPushButton("恢复 C")
+        self.btn_reset_shortcut.setAutoDefault(False)
+        self.btn_reset_shortcut.clicked.connect(
+            lambda: self.key_mask_shortcut.setKeySequence(QKeySequence(DEFAULT_OVERLAY_SHORTCUT)))
+        binding_row.addWidget(self.btn_reset_shortcut)
+        shortcut_layout.addLayout(binding_row)
+        shortcut_hint = QLabel("点击输入框后按下按键，支持 C、Ctrl+C 等单组快捷键。")
+        shortcut_hint.setObjectName("settingsDescription")
+        shortcut_hint.setWordWrap(True)
+        shortcut_layout.addWidget(shortcut_hint)
+        self.lbl_shortcut_error = QLabel()
+        self.lbl_shortcut_error.setWordWrap(True)
+        self.lbl_shortcut_error.setStyleSheet(f"color: {t['text_red']};")
+        shortcut_layout.addWidget(self.lbl_shortcut_error)
+        layout.addWidget(shortcut_card)
         layout.addStretch(1)
         layout.addSpacing(8)
 
         footer = QHBoxLayout()
+        footer.setContentsMargins(28, 12, 28, 20)
         remember = QLabel("保存后自动记住偏好")
         remember.setObjectName("settingsHint")
         footer.addWidget(remember)
@@ -147,10 +203,15 @@ class SettingsDialog(QDialog):
         self.btn_save.setDefault(True)
         self.btn_save.clicked.connect(self.save_requested)
         footer.addWidget(self.btn_save)
-        layout.addLayout(footer)
+        outer.addLayout(footer)
+        self.key_mask_shortcut.keySequenceChanged.connect(self.validate_overlay_shortcut)
+        self.validate_overlay_shortcut()
         self.setTabOrder(self.chk_recursive, self.filter_buttons["all"])
         self.setTabOrder(self.filter_buttons["without_mask"], self.chk_preserve_structure)
-        self.setTabOrder(self.chk_preserve_structure, self.btn_cancel)
+        self.setTabOrder(self.chk_preserve_structure, self.combo_mask_shortcut_mode)
+        self.setTabOrder(self.combo_mask_shortcut_mode, self.key_mask_shortcut)
+        self.setTabOrder(self.key_mask_shortcut, self.btn_reset_shortcut)
+        self.setTabOrder(self.btn_reset_shortcut, self.btn_cancel)
         self.setTabOrder(self.btn_cancel, self.btn_save)
 
     @staticmethod
@@ -197,10 +258,33 @@ class SettingsDialog(QDialog):
         return (self.chk_recursive.isChecked(), self.chk_preserve_structure.isChecked(),
                 image_filter)
 
+    def overlay_values(self):
+        return (self.combo_mask_shortcut_mode.currentData(),
+                self.key_mask_shortcut.keySequence().toString(QKeySequence.PortableText))
+
+    def validate_overlay_shortcut(self):
+        error = shortcut_error(self.key_mask_shortcut.keySequence())
+        self.lbl_shortcut_error.setText(error)
+        self.lbl_shortcut_error.setVisible(bool(error))
+        self.btn_save.setEnabled(not error)
+        return not error
+
     @staticmethod
     def _style(t):
         return f"""
 QDialog#settingsDialog {{ background: {t['bg_root']}; }}
+QDialog#settingsDialog QScrollArea, QDialog#settingsDialog QScrollArea > QWidget > QWidget {{
+    background: {t['bg_root']}; border: none;
+}}
+QDialog#settingsDialog QKeySequenceEdit {{
+    background: {t['bg_input']}; color: {t['text_primary']};
+    border: 1px solid {t['border']}; border-radius: 5px; padding: 6px;
+    font-family: 'Microsoft YaHei', 'Segoe UI'; font-size: 12px;
+}}
+QDialog#settingsDialog QKeySequenceEdit QLineEdit {{
+    background: {t['bg_input']}; color: {t['text_primary']};
+    border: 1px solid {t['border']}; border-radius: 5px; padding: 6px;
+}}
 QDialog#settingsDialog QLabel {{
     color: {t['text_primary']}; font-family: 'Microsoft YaHei', 'Segoe UI';
     font-size: 12px; background: transparent; border: none;
@@ -237,4 +321,4 @@ QDialog#settingsDialog QPushButton#settingsSave {{
     background: #2563a6; color: white; border-color: #2563a6;
 }}
 QDialog#settingsDialog QPushButton#settingsSave:hover {{ background: #1d5087; }}
-"""
+""" + build_control_style(t)

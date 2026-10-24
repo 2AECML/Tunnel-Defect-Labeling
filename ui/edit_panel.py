@@ -6,8 +6,7 @@
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QSlider, QCheckBox,
-    QComboBox, QButtonGroup, QFrame, QDialog, QSizeGrip,
-    QListView
+    QButtonGroup, QFrame, QDialog, QSizeGrip
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont
@@ -17,17 +16,18 @@ from core.config import (
     DEFAULT_BRUSH_LINE,
     DEFAULT_BRUSH_POLY,
     DEFAULT_BRUSH_ERASER,
-    DEFAULT_FILL_TOLERANCE,
 )
 from ui.class_manager_dialog import ClassManagerDialog
 from ui.theme import THEMES, build_panel_style
+from ui.styled_controls import ThemedComboBox, ThemedSpinBox
 
 
 # ── 带标签滑块 ────────────────────────────────────────────────────────────────
 class LabeledSlider(QWidget):
     valueChanged = pyqtSignal(int)
 
-    def __init__(self, label, mn, mx, val, label_w=52, slider_w=130, parent=None):
+    def __init__(self, label, mn, mx, val, label_w=52, slider_w=130, parent=None,
+                 editable=False):
         super().__init__(parent)
         h = QHBoxLayout(self)
         h.setContentsMargins(0, 0, 0, 0)
@@ -39,17 +39,27 @@ class LabeledSlider(QWidget):
         self.slider.setRange(mn, mx)
         self.slider.setValue(val)
         self.slider.setFixedWidth(slider_w)
-        self.lbl_val = QLabel(str(val))
-        self.lbl_val.setFixedWidth(34)
-        self.lbl_val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.lbl_val.setObjectName("sliderValLabel")
-        self.slider.valueChanged.connect(lambda v: (
-            self.lbl_val.setText(str(v)),
-            self.valueChanged.emit(v)
-        ))
+        if editable:
+            self.spin_value = ThemedSpinBox()
+            self.spin_value.setRange(mn, mx)
+            self.spin_value.setValue(val)
+            self.spin_value.setFixedWidth(72)
+            self.spin_value.setKeyboardTracking(True)
+            self.spin_value.setAccessibleName(label)
+            self.spin_value.valueChanged.connect(self.slider.setValue)
+            self.slider.valueChanged.connect(self.spin_value.setValue)
+            value_widget = self.spin_value
+        else:
+            self.lbl_val = QLabel(str(val))
+            self.lbl_val.setFixedWidth(34)
+            self.lbl_val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.lbl_val.setObjectName("sliderValLabel")
+            self.slider.valueChanged.connect(lambda value: self.lbl_val.setText(str(value)))
+            value_widget = self.lbl_val
+        self.slider.valueChanged.connect(self.valueChanged)
         h.addWidget(self.lbl_name)
         h.addWidget(self.slider)
-        h.addWidget(self.lbl_val)
+        h.addWidget(value_widget)
 
     def value(self): return self.slider.value()
 
@@ -194,7 +204,8 @@ class EditPanel(QWidget):
         self.slider_brush.valueChanged.connect(self.brush_changed)
         v.addWidget(self.slider_brush)
         self.slider_similarity = LabeledSlider(
-            "色差阈值", 0, 100, DEFAULT_FILL_TOLERANCE, label_w=60, slider_w=122
+            "色差阈值", 0, 100, self.state.fill_tolerance, label_w=60, slider_w=122,
+            editable=True,
         )
         self.slider_similarity.valueChanged.connect(self.similarity_changed)
         self.slider_similarity.hide()
@@ -209,8 +220,7 @@ class EditPanel(QWidget):
         self.lbl_class_dot.setFixedSize(14, 14)
         self.lbl_class_dot.setStyleSheet(
             "border-radius:7px; border:1px solid #888; background:red;")
-        self.combo_class = QComboBox()
-        self.combo_class.setView(QListView())
+        self.combo_class = ThemedComboBox()
 
         self.combo_class.currentIndexChanged.connect(self._on_class_changed)
         class_row.addWidget(self.lbl_class_dot)
@@ -364,7 +374,6 @@ class EditPanel(QWidget):
         # 提取颜色，方便 ComboBox 下拉列表使用
         bg_input = t.get('bg_input', '#2d2d30' if theme_name == 'dark' else '#ffffff')
         text_primary = t.get('text_primary', '#e0e0e0' if theme_name == 'dark' else '#000000')
-        bg_hover = t.get('bg_hover', '#3e3e42' if theme_name == 'dark' else '#e5f3ff')
         border_col = t.get('border', '#404040' if theme_name == 'dark' else '#cccccc')
 
         self.setStyleSheet(build_panel_style(t) + f"""
@@ -377,23 +386,13 @@ class EditPanel(QWidget):
             QLabel#sectionLabel {{ color: {t['section_label']}; }}
             QLabel#sliderLabel  {{ color: {t['text_secondary']}; font-size:11px; }}
             QLabel#sliderValLabel {{ color: {t['text_primary']}; font-size:11px; }}
+            QSpinBox {{
+                background: {bg_input}; color: {text_primary};
+                border: 1px solid {border_col}; border-radius: 4px;
+                padding: 2px 4px; font-size: 11px;
+            }}
             QLabel#statsLabel   {{ color: {t['text_muted']}; }}
             QFrame#panelSep     {{ color: {t['sep']}; max-height:1px; }}
-
-            /* 👇 新增：修复 QComboBox 下拉菜单看不清的问题 */
-            QComboBox QAbstractItemView {{
-                background-color: {bg_input};
-                color: {text_primary};
-                selection-background-color: {bg_hover};
-                selection-color: {text_primary};
-                border: 1px solid {border_col};
-                outline: none; /* 去除虚线框 */
-            }}
-            /* 下拉列表每一项的内边距，让它不那么拥挤 */
-            QComboBox::item {{
-                min-height: 24px;
-                padding-left: 5px;
-            }}
 
             QPushButton#manageBtn {{
                 background:{t['bg_input']}; color:{t['text_secondary']};

@@ -66,6 +66,7 @@ THEMES = {
         "spin_bg":        "#242424",
         "spin_text":      "#c8c8c8",
         "spin_border":    "#3a3a3a",
+        "input_selection_bg": "#1f5f9f",
 
         # Section label
         "section_label":  "#5090c0",
@@ -77,6 +78,8 @@ THEMES = {
         "combo_bg":       "#242424",
         "combo_text":     "#d0d0d0",
         "combo_border":   "#3a3a3a",
+        "scroll_handle":  "#454b53",
+        "scroll_hover":   "#626c77",
 
         # Checkbox
         "chk_indicator_bg":      "#242424",
@@ -141,6 +144,7 @@ THEMES = {
         "spin_bg":        "#ffffff",
         "spin_text":      "#1a1a1a",
         "spin_border":    "#c0c0c0",
+        "input_selection_bg": "#195ba8",
 
         "section_label":  "#1a5a9a",
         "sep":            "#d8d8d8",
@@ -148,6 +152,8 @@ THEMES = {
         "combo_bg":       "#ffffff",
         "combo_text":     "#1a1a1a",
         "combo_border":   "#c0c0c0",
+        "scroll_handle":  "#c3cbd4",
+        "scroll_hover":   "#9ba9b8",
 
         "chk_indicator_bg":      "#ffffff",
         "chk_indicator_checked": "#d0e8ff",
@@ -158,6 +164,106 @@ THEMES = {
         "theme_btn_text": "🌙  夜间模式",
     }
 }
+
+
+def build_control_style(t: dict) -> str:
+    """主窗口、设置和编辑面板共用的滚动条及下拉选择样式。"""
+    return f"""
+QScrollBar:vertical {{
+    background: transparent; border: none; width: 12px; margin: 4px 2px;
+}}
+QScrollBar:horizontal {{
+    background: transparent; border: none; height: 12px; margin: 2px 4px;
+}}
+QScrollBar::handle:vertical {{
+    background: {t['scroll_handle']}; border: none; border-radius: 4px; min-height: 28px;
+}}
+QScrollBar::handle:horizontal {{
+    background: {t['scroll_handle']}; border: none; border-radius: 4px; min-width: 28px;
+}}
+QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {{
+    background: {t['scroll_hover']};
+}}
+QScrollBar::handle:vertical:pressed, QScrollBar::handle:horizontal:pressed {{
+    background: {t['text_accent']};
+}}
+QScrollBar::handle:vertical:disabled, QScrollBar::handle:horizontal:disabled {{
+    background: {t['sep']};
+}}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+    height: 0; width: 0; border: none; background: transparent;
+}}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+    width: 0; height: 0; border: none; background: transparent;
+}}
+QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; border: none; }}
+QScrollBar::up-arrow, QScrollBar::down-arrow,
+QScrollBar::left-arrow, QScrollBar::right-arrow {{ image: none; width: 0; height: 0; }}
+QAbstractScrollArea::corner {{ background: {t['bg_root']}; border: none; }}
+QComboBox {{
+    combobox-popup: 0;
+    background: {t['combo_bg']}; color: {t['combo_text']};
+    border: 1px solid {t['combo_border']}; border-radius: 6px;
+    padding: 6px 32px 6px 10px; min-height: 18px;
+    font-family: 'Microsoft YaHei', 'Segoe UI'; font-size: 12px;
+}}
+QComboBox:hover {{ border-color: {t['border_hover']}; background: {t['bg_hover']}; }}
+QComboBox:focus, QComboBox:on {{ border-color: {t['text_accent']}; }}
+QComboBox:disabled {{
+    background: {t['bg_root']}; color: {t['text_muted']}; border-color: {t['sep']};
+}}
+QComboBox::drop-down {{
+    subcontrol-origin: padding; subcontrol-position: top right;
+    width: 28px; border: none; background: transparent;
+}}
+QComboBox::down-arrow {{ image: none; width: 0; height: 0; }}
+QFrame#comboPopup {{ background: transparent; border: none; }}
+QComboBox QAbstractItemView {{
+    background: {t['bg_bar']}; color: {t['text_primary']};
+    border: 1px solid {t['border']}; border-radius: 6px;
+    padding: 4px; outline: 0;
+    selection-background-color: {t['tool_btn_checked_bg']};
+    selection-color: {t['tool_btn_checked_text']};
+    font-family: 'Microsoft YaHei', 'Segoe UI'; font-size: 12px;
+}}
+QComboBox QAbstractItemView::item {{
+    min-height: 24px; padding: 4px 8px; border: none; border-radius: 4px;
+}}
+QComboBox QAbstractItemView::item:hover {{
+    background: {t['bg_hover']}; color: {t['text_primary']};
+}}
+QComboBox QAbstractItemView::item:selected {{
+    background: {t['tool_btn_checked_bg']}; color: {t['tool_btn_checked_text']};
+}}
+QComboBox QAbstractItemView::item:disabled {{ color: {t['text_muted']}; }}
+QSpinBox#stepperSpinBox {{ padding: 3px 24px 3px 6px; }}
+QSpinBox#stepperSpinBox, QSpinBox#stepperSpinBox QLineEdit {{
+    selection-background-color: {t['input_selection_bg']}; selection-color: #ffffff;
+}}
+QSpinBox#stepperSpinBox:focus {{ border-color: {t['text_accent']}; }}
+QSpinBox#stepperSpinBox::up-button {{
+    subcontrol-origin: border; subcontrol-position: top right;
+    width: 22px; height: 15px; background: transparent;
+    border: none; border-left: 1px solid {t['sep']}; border-top-right-radius: 4px;
+}}
+QSpinBox#stepperSpinBox::down-button {{
+    subcontrol-origin: border; subcontrol-position: bottom right;
+    width: 22px; height: 15px; background: transparent;
+    border: none; border-left: 1px solid {t['sep']}; border-bottom-right-radius: 4px;
+}}
+QSpinBox#stepperSpinBox::up-button:hover, QSpinBox#stepperSpinBox::down-button:hover {{
+    background: {t['bg_hover']};
+}}
+QSpinBox#stepperSpinBox::up-button:pressed, QSpinBox#stepperSpinBox::down-button:pressed {{
+    background: {t['btn_folder_bg']};
+}}
+QSpinBox#stepperSpinBox::up-button:disabled, QSpinBox#stepperSpinBox::down-button:disabled {{
+    background: transparent;
+}}
+QSpinBox#stepperSpinBox::up-arrow, QSpinBox#stepperSpinBox::down-arrow {{
+    image: none; width: 0; height: 0;
+}}
+"""
 
 
 def build_main_style(t: dict) -> str:
@@ -312,7 +418,7 @@ QGraphicsView {{
     border: none;
     background: {t['bg_root']};
 }}
-"""
+""" + build_control_style(t)
 
 
 def build_panel_style(t: dict) -> str:
@@ -353,20 +459,6 @@ QPushButton#toolBtn:checked {{
     color: {t['tool_btn_checked_text']};
     font-weight: bold;
 }}
-QComboBox {{
-    background: {t['combo_bg']};
-    color: {t['combo_text']};
-    border: 1px solid {t['combo_border']};
-    border-radius: 4px;
-    padding: 4px 8px;
-    font-size: 12px;
-}}
-QComboBox::drop-down {{ border: none; width: 20px; }}
-QComboBox QAbstractItemView {{
-    background: {t['combo_bg']};
-    color: {t['combo_text']};
-    selection-background-color: {t['tool_btn_checked_bg']};
-}}
 QCheckBox {{
     color: {t['chk_text']};
     font-size: 11px;
@@ -397,4 +489,4 @@ QSlider::sub-page:horizontal {{
     background: {t['slider_handle']};
     border-radius: 2px;
 }}
-"""
+""" + build_control_style(t)

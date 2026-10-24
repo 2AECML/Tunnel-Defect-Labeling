@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (
     QListView, QMenu
 )
 from PyQt5.QtCore import Qt, QRect, QPoint, QEvent, QSettings
-from PyQt5.QtGui import QImage, QPixmap, QColor, QPalette, QFontMetrics, QFont, QScreen, QPainter
+from PyQt5.QtGui import QImage, QPixmap, QColor, QPalette, QFontMetrics, QFont, QScreen, QPainter, QKeySequence
 
 from core import (
     AnnotationState, DrawEngine, DrawTool, PolygonEditor, VALID_IMAGE_EXTS,
@@ -28,6 +28,11 @@ from ui.graphics_view import InteractiveGraphicsView
 from ui.edit_panel import EditPanel
 from ui.settings_dialog import SettingsDialog, IMAGE_FILTER_OPTIONS
 from ui.delete_confirmation import confirm_delete
+from ui.overlay_shortcut import (
+    DEFAULT_OVERLAY_SHORTCUT, DEFAULT_OVERLAY_SHORTCUT_MODE, OVERLAY_SHORTCUT_MODES,
+    OverlayShortcutController, shortcut_error,
+)
+from core.config import DEFAULT_FILL_TOLERANCE
 from ui.theme import THEMES, build_main_style
 
 
@@ -173,6 +178,19 @@ class MainWindow(QMainWindow):
         self.image_filter = self._settings.value("image_filter", "all", type=str)
         if self.image_filter not in dict(IMAGE_FILTER_OPTIONS):
             self.image_filter = "all"
+        self.mask_shortcut_mode = self._settings.value(
+            "mask_shortcut_mode", DEFAULT_OVERLAY_SHORTCUT_MODE, type=str)
+        if self.mask_shortcut_mode not in dict(OVERLAY_SHORTCUT_MODES):
+            self.mask_shortcut_mode = DEFAULT_OVERLAY_SHORTCUT_MODE
+        self.mask_shortcut = self._settings.value(
+            "mask_shortcut", DEFAULT_OVERLAY_SHORTCUT, type=str)
+        if shortcut_error(QKeySequence(self.mask_shortcut, QKeySequence.PortableText)):
+            self.mask_shortcut = DEFAULT_OVERLAY_SHORTCUT
+        try:
+            self.state.fill_tolerance = max(0, min(100, self._settings.value(
+                "fill_tolerance", DEFAULT_FILL_TOLERANCE, type=int)))
+        except (TypeError, ValueError):
+            self.state.fill_tolerance = DEFAULT_FILL_TOLERANCE
         self._mask_index = None
 
         self._last_pen_tool = DrawTool.LINE
@@ -190,6 +208,9 @@ class MainWindow(QMainWindow):
         self._theme_name = "light"
 
         self._build_ui()
+        self._overlay_shortcut = OverlayShortcutController(
+            self, self.mask_shortcut_mode, self.mask_shortcut)
+        self._update_overlay_shortcut_tooltip()
         self._resize_handles = [
             ResizeHandle(self, edges, cursor)
             for edges, cursor in (
@@ -321,7 +342,7 @@ class MainWindow(QMainWindow):
 
         tb.addStretch()
 
-        self.btn_settings = _btn("⚙  设置", "settingsBtn", tooltip="文件查找与掩膜保存设置")
+        self.btn_settings = _btn("⚙  设置", "settingsBtn", tooltip="文件查找、掩膜保存与快捷键设置")
         self.btn_settings.clicked.connect(self._open_settings)
         tb.addWidget(self.btn_settings)
 
@@ -334,7 +355,7 @@ class MainWindow(QMainWindow):
 
         # 掩膜显示
         self.btn_mask_vis = _btn("◑  掩膜叠加", "maskBtn",
-                                  checkable=True, tooltip="切换掩膜显示 (W)")
+                                  checkable=True)
         self.btn_mask_vis.setChecked(True)
         self.btn_mask_vis.clicked.connect(self._toggle_mask_visible)
         tb.addWidget(self.btn_mask_vis)
@@ -752,7 +773,9 @@ class MainWindow(QMainWindow):
         self._update_dirty_indicator()
 
     def _on_similarity_changed(self, value):
-        self.state.fill_tolerance = value
+        self.state.fill_tolerance = max(0, min(100, int(value)))
+        self._settings.setValue("fill_tolerance", self.state.fill_tolerance)
+        self._settings.sync()
 
     def _refresh_stats(self):
         if self.edit_panel:
@@ -872,8 +895,33 @@ class MainWindow(QMainWindow):
     # 掩膜可见切换
     # ──────────────────────────────────────────────────────────────────────────
     def _toggle_mask_visible(self):
-        self.state.is_mask_visible = self.btn_mask_vis.isChecked()
-        self.viewer.set_overlay_visible(self.state.is_mask_visible)
+        # 鼠标主动切换时结束临时反转，以此次点击选择的状态为准。
+        visible = self.btn_mask_vis.isChecked()
+        self._overlay_shortcut.restore()
+        self._set_mask_visible(visible)
+
+    def _set_mask_visible(self, visible):
+        self.state.is_mask_visible = bool(visible)
+        self.btn_mask_vis.setChecked(bool(visible))
+        self.viewer.set_overlay_visible(bool(visible))
+
+    def _update_overlay_shortcut_tooltip(self):
+        key = QKeySequence(self.mask_shortcut).toString(QKeySequence.NativeText)
+        action = "按住暂时反转，松开恢复" if self.mask_shortcut_mode == "hold" else "按键切换显示"
+        self.btn_mask_vis.setToolTip(f"{action} ({key})；可在设置中修改")
+
+    def _apply_overlay_settings(self, mode, shortcut):
+        sequence = QKeySequence(shortcut, QKeySequence.PortableText)
+        if mode not in dict(OVERLAY_SHORTCUT_MODES) or shortcut_error(sequence):
+            return False
+        self._overlay_shortcut.configure(mode, shortcut)
+        self.mask_shortcut_mode = mode
+        self.mask_shortcut = sequence.toString(QKeySequence.PortableText)
+        self._settings.setValue("mask_shortcut_mode", mode)
+        self._settings.setValue("mask_shortcut", self.mask_shortcut)
+        self._settings.sync()
+        self._update_overlay_shortcut_tooltip()
+        return True
 
     # ──────────────────────────────────────────────────────────────────────────
     # 撤销 / 折线
@@ -945,10 +993,13 @@ class MainWindow(QMainWindow):
     # ──────────────────────────────────────────────────────────────────────────
     def _open_settings(self):
         dialog = SettingsDialog(self.recursive_search, self.preserve_mask_structure,
-                                self._theme_name, self, image_filter=self.image_filter)
+                                self._theme_name, self, image_filter=self.image_filter,
+                                mask_shortcut_mode=self.mask_shortcut_mode,
+                                mask_shortcut=self.mask_shortcut)
 
         def save():
-            if self._apply_folder_settings(*dialog.values()):
+            if dialog.validate_overlay_shortcut() and self._apply_folder_settings(*dialog.values()):
+                self._apply_overlay_settings(*dialog.overlay_values())
                 dialog.accept()
 
         dialog.save_requested.connect(save)
@@ -1320,12 +1371,6 @@ class MainWindow(QMainWindow):
                 self._next_image()
             elif key == Qt.Key_D and not (mods & Qt.ControlModifier):
                 self._save_and_next()
-            elif key == Qt.Key_W:
-                vis = not self.state.is_mask_visible
-                self.state.is_mask_visible = vis
-                self.btn_mask_vis.setChecked(vis)
-                self.viewer.set_overlay_visible(vis)
-
             elif ep_on and not (mods & Qt.AltModifier) and key == Qt.Key_1:
                 self.engine.cancel()
                 self.viewer.clear_stroke()
@@ -1414,6 +1459,7 @@ class MainWindow(QMainWindow):
         if not self._confirm_save_if_dirty():
             event.ignore()
             return
+        self._overlay_shortcut.restore()
         if self.edit_panel:
             self.edit_panel.close()
         super().closeEvent(event)

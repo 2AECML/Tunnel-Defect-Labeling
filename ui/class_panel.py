@@ -2,9 +2,9 @@
 """
 类别选择面板：下拉框 + 颜色预览 + 管理按钮 + 像素统计
 """
-from PyQt5.QtWidgets import (QWidget, QHBoxLayout, QLabel,
-                             QComboBox, QPushButton, QDialog)
+from PyQt5.QtWidgets import (QWidget, QHBoxLayout, QLabel, QPushButton, QDialog)
 from PyQt5.QtCore import pyqtSignal
+from ui.styled_controls import ThemedComboBox
 
 
 class ClassPanel(QWidget):
@@ -24,7 +24,7 @@ class ClassPanel(QWidget):
 
         layout.addWidget(QLabel("🏷 当前绘制类别 (数字键切换):"))
 
-        self.combo = QComboBox()
+        self.combo = ThemedComboBox()
         self.combo.setMinimumWidth(200)
         self.combo.currentIndexChanged.connect(self._on_combo_changed)
         layout.addWidget(self.combo)
