@@ -20,6 +20,7 @@ from core.config import (
 from ui.class_manager_dialog import ClassManagerDialog
 from ui.theme import THEMES, build_panel_style
 from ui.styled_controls import ThemedComboBox, ThemedSpinBox
+from ui.shortcuts import action_shortcut_text
 
 
 # ── 带标签滑块 ────────────────────────────────────────────────────────────────
@@ -77,6 +78,8 @@ class EditPanel(QWidget):
     tool_changed = pyqtSignal(str)
     brush_changed = pyqtSignal(int)
     similarity_changed = pyqtSignal(int)
+    fill_range_changed = pyqtSignal(bool)
+    resample_requested = pyqtSignal()
     class_changed = pyqtSignal(int)
     alpha_changed = pyqtSignal(int)
     contour_changed = pyqtSignal(bool)
@@ -84,6 +87,7 @@ class EditPanel(QWidget):
     brightness_changed = pyqtSignal(int)
     contrast_changed = pyqtSignal(int)
     undo_requested = pyqtSignal()
+    redo_requested = pyqtSignal()
     save_requested = pyqtSignal()
     close_edit_requested = pyqtSignal()
     classes_updated = pyqtSignal(list)
@@ -138,45 +142,75 @@ class EditPanel(QWidget):
         tool_row = QHBoxLayout()
         tool_row.setSpacing(6)
         # 👇 文案从"折线笔" -> "线状笔"
-        self.btn_line = self._tool_btn("🖌", "线状笔", "[ 1 ]")
-        self.btn_poly = self._tool_btn("⬛", "面状笔", "[ 2 ]")
-        self.btn_eraser = self._tool_btn("⬜", "橡皮擦", "[ E ]")
-        self.btn_edit_poly = QPushButton("◇  编辑已有多边形    [ 4 ]")
+        self.btn_line = self._tool_btn("🖌", "线状笔")
+        self.btn_poly = self._tool_btn("⬛", "面状笔")
+        self.btn_eraser = self._tool_btn("⬜", "橡皮擦")
+        self.btn_eraser.setToolTip("使用上次选择的擦除方式，可选笔刷、矩形或面状。")
+        self.btn_edit_poly = QPushButton("◇  编辑已有多边形")
         self.btn_edit_poly.setObjectName("toolBtn")
         self.btn_edit_poly.setCheckable(True)
         self.btn_edit_poly.setFixedHeight(38)
-        self.btn_auto_fill = QPushButton("▣  相似像素自动填充    [ 5 ]")
+        self.btn_auto_fill = QPushButton("▣  相似像素自动填充")
         self.btn_auto_fill.setObjectName("toolBtn")
         self.btn_auto_fill.setCheckable(True)
         self.btn_auto_fill.setFixedHeight(38)
+        self.btn_sample_fill = QPushButton("取样框选填充")
+        self.btn_sample_fill.setObjectName("toolBtn")
+        self.btn_sample_fill.setCheckable(True)
+        self.btn_sample_fill.setFixedHeight(38)
         grp = QButtonGroup(self)
         for b in (
             self.btn_line, self.btn_poly, self.btn_eraser,
-            self.btn_edit_poly, self.btn_auto_fill,
+            self.btn_edit_poly, self.btn_auto_fill, self.btn_sample_fill,
         ):
             grp.addButton(b)
         self.btn_line.setChecked(True)
         self.btn_line.clicked.connect(lambda: self._on_tool(DrawTool.LINE))
         self.btn_poly.clicked.connect(lambda: self._on_tool(DrawTool.POLY))
-        self.btn_eraser.clicked.connect(lambda: self._on_tool(DrawTool.ERASER))
+        self.btn_eraser.clicked.connect(lambda: self._on_tool(self.state.eraser_tool))
         self.btn_edit_poly.clicked.connect(
             lambda: self._on_tool(DrawTool.EDIT_POLY)
         )
         self.btn_auto_fill.clicked.connect(
             lambda: self._on_tool(DrawTool.AUTO_FILL)
         )
+        self.btn_sample_fill.clicked.connect(lambda: self._on_tool(DrawTool.SAMPLE_FILL))
         tool_row.addWidget(self.btn_line)
         tool_row.addWidget(self.btn_poly)
         tool_row.addWidget(self.btn_eraser)
         tool_row.addStretch()
         v.addLayout(tool_row)
+        self.eraser_controls = QWidget()
+        eraser_row = QHBoxLayout(self.eraser_controls)
+        eraser_row.setContentsMargins(0, 0, 0, 0)
+        eraser_row.setSpacing(6)
+        eraser_row.addWidget(QLabel("擦除方式"))
+        self.combo_eraser = ThemedComboBox()
+        self.combo_eraser.setAccessibleName("擦除方式")
+        for label, tool in (("笔刷橡皮擦", DrawTool.ERASER),
+                            ("矩形橡皮擦", DrawTool.RECT_ERASER),
+                            ("面状橡皮擦", DrawTool.POLY_ERASER)):
+            self.combo_eraser.addItem(label, tool)
+        self.combo_eraser.setCurrentIndex(self.combo_eraser.findData(self.state.eraser_tool))
+        self.combo_eraser.currentIndexChanged.connect(self._on_eraser_changed)
+        eraser_row.addWidget(self.combo_eraser, 1)
+        self.eraser_controls.hide()
+        v.addWidget(self.eraser_controls)
+        self.lbl_eraser_hint = QLabel()
+        self.lbl_eraser_hint.setObjectName("statsLabel")
+        self.lbl_eraser_hint.setWordWrap(True)
+        self.lbl_eraser_hint.hide()
+        v.addWidget(self.lbl_eraser_hint)
         v.addWidget(self.btn_edit_poly)
-        v.addWidget(self.btn_auto_fill)
+        fill_row = QHBoxLayout()
+        fill_row.addWidget(self.btn_auto_fill, 1)
+        fill_row.addWidget(self.btn_sample_fill, 1)
+        v.addLayout(fill_row)
         self.lbl_polygon_hint = QLabel(
             "单击已有面状区域选中；拖动控制点改形，"
             "拖动区域内部整体移动；双击边线增加控制点；"
             "加点不改变形状；按住左键拖动改形或移动；"
-            "选中控制点或多边形后，右击或 Ctrl+D 删除。"
+            "选中控制点或多边形后，右击删除。"
         )
         self.lbl_polygon_hint.setObjectName("statsLabel")
         self.lbl_polygon_hint.setWordWrap(True)
@@ -193,11 +227,36 @@ class EditPanel(QWidget):
         self.lbl_auto_fill_hint.setWordWrap(True)
         self.lbl_auto_fill_hint.hide()
         v.addWidget(self.lbl_auto_fill_hint)
+        self.sample_fill_controls = QWidget()
+        sample_layout = QVBoxLayout(self.sample_fill_controls)
+        sample_layout.setContentsMargins(0, 0, 0, 0)
+        self.lbl_sample_fill_hint = QLabel()
+        self.lbl_sample_fill_hint.setObjectName("statsLabel")
+        self.lbl_sample_fill_hint.setWordWrap(True)
+        sample_layout.addWidget(self.lbl_sample_fill_hint)
+        sample_row = QHBoxLayout()
+        self.combo_fill_range = ThemedComboBox()
+        self.combo_fill_range.setAccessibleName("填充范围")
+        self.combo_fill_range.addItem("矩形范围", False)
+        self.combo_fill_range.addItem("面状范围", True)
+        self.combo_fill_range.setCurrentIndex(int(self.state.fill_freehand))
+        self.combo_fill_range.currentIndexChanged.connect(
+            lambda: self.fill_range_changed.emit(bool(self.combo_fill_range.currentData()))
+        )
+        sample_row.addWidget(self.combo_fill_range, 1)
+        self.btn_resample = QPushButton("重新取样")
+        self.btn_resample.setObjectName("manageBtn")
+        self.btn_resample.clicked.connect(self.resample_requested)
+        sample_row.addWidget(self.btn_resample)
+        sample_layout.addLayout(sample_row)
+        self.sample_fill_controls.hide()
+        v.addWidget(self.sample_fill_controls)
 
         # ！！ 这里删除了原本所有的 line_hint 提示框相关的代码 ！！
 
         # §2 笔刷
-        v.addWidget(_sep())
+        self.size_separator = _sep()
+        v.addWidget(self.size_separator)
         self.lbl_size_section = self._section("BRUSH SIZE")
         v.addWidget(self.lbl_size_section)
         self.slider_brush = LabeledSlider("笔刷", 1, 80, DEFAULT_BRUSH_LINE)
@@ -277,15 +336,21 @@ class EditPanel(QWidget):
         act = QHBoxLayout()
         act.setSpacing(8)
         self.btn_undo = QPushButton("↩  撤销\nCtrl+Z")
+        self.btn_redo = QPushButton("↪  重做\nCtrl+Y")
         self.btn_save = QPushButton("💾  保存\nCtrl+S")
         self.btn_undo.setObjectName("undoBtn")
+        self.btn_redo.setObjectName("undoBtn")
         self.btn_save.setObjectName("saveBtn")
         self.btn_undo.setFixedHeight(46)
+        self.btn_redo.setFixedHeight(46)
         self.btn_save.setFixedHeight(46)
         self.btn_undo.setEnabled(False)
+        self.btn_redo.setEnabled(False)
         self.btn_undo.clicked.connect(self.undo_requested)
+        self.btn_redo.clicked.connect(self.redo_requested)
         self.btn_save.clicked.connect(self.save_requested)
         act.addWidget(self.btn_undo)
+        act.addWidget(self.btn_redo)
         act.addWidget(self.btn_save)
         v.addLayout(act)
         v.addStretch()
@@ -305,8 +370,8 @@ class EditPanel(QWidget):
         lbl.setStyleSheet("font-size:10px; font-weight:bold; letter-spacing:1.5px;")
         return lbl
 
-    def _tool_btn(self, icon, label, shortcut):
-        b = QPushButton(f"{icon}\n{label}\n{shortcut}")
+    def _tool_btn(self, icon, label):
+        b = QPushButton(f"{icon}\n{label}")
         b.setObjectName("toolBtn")
         b.setCheckable(True)
         b.setFixedSize(82, 64)
@@ -327,6 +392,8 @@ class EditPanel(QWidget):
     # ── 回调 ─────────────────────────────────────────────────────────────────
     def _on_tool(self, tool):
         self.state.tool = tool
+        if tool in DrawTool.ERASERS:
+            self.state.eraser_tool = tool
         if tool == DrawTool.LINE:
             self.slider_brush.setValue(DEFAULT_BRUSH_LINE)
         elif tool == DrawTool.POLY:
@@ -336,15 +403,49 @@ class EditPanel(QWidget):
         self._update_tool_controls(tool)
         self.tool_changed.emit(tool)
 
+    def _on_eraser_changed(self, index):
+        tool = self.combo_eraser.itemData(index)
+        if tool in DrawTool.ERASERS:
+            self._on_tool(tool)
+
     def _update_tool_controls(self, tool):
         editing_polygon = tool == DrawTool.EDIT_POLY
-        auto_filling = tool == DrawTool.AUTO_FILL
+        sampled_filling = tool == DrawTool.SAMPLE_FILL
+        auto_filling = tool == DrawTool.AUTO_FILL or sampled_filling
+        area_erasing = tool in DrawTool.AREA_ERASERS
+        self.eraser_controls.setVisible(tool in DrawTool.ERASERS)
+        selected_eraser = tool if tool in DrawTool.ERASERS else self.state.eraser_tool
+        self.combo_eraser.blockSignals(True)
+        self.combo_eraser.setCurrentIndex(self.combo_eraser.findData(selected_eraser))
+        self.combo_eraser.blockSignals(False)
         self.lbl_size_section.setText("PIXEL SIMILARITY" if auto_filling else "BRUSH SIZE")
-        self.slider_brush.setVisible(not auto_filling)
+        self.size_separator.setVisible(not area_erasing)
+        self.lbl_size_section.setVisible(not area_erasing)
+        self.slider_brush.setVisible(not auto_filling and not area_erasing)
         self.slider_brush.setEnabled(not editing_polygon)
         self.slider_similarity.setVisible(auto_filling)
+        if auto_filling:
+            tolerance = (
+                self.state.sample_fill_tolerance if sampled_filling else self.state.fill_tolerance
+            )
+            was_blocked = self.slider_similarity.blockSignals(True)
+            self.slider_similarity.setValue(tolerance)
+            self.slider_similarity.blockSignals(was_blocked)
+            self.slider_similarity.setToolTip(
+                "像素与最近 Lab 颜色中心的距离上限" if sampled_filling else ""
+            )
         self.lbl_polygon_hint.setVisible(editing_polygon)
-        self.lbl_auto_fill_hint.setVisible(auto_filling)
+        self.lbl_auto_fill_hint.setVisible(tool == DrawTool.AUTO_FILL)
+        self.sample_fill_controls.setVisible(sampled_filling)
+        if sampled_filling:
+            self.set_sample_fill_status()
+        self.lbl_eraser_hint.setVisible(area_erasing)
+        if area_erasing:
+            self.lbl_eraser_hint.setText(
+                "按住左键从一个角拖到对角，松开后擦除矩形框内的标注。"
+                if tool == DrawTool.RECT_ERASER else
+                "像面状笔一样按住左键沿边界拖动，松开后自动闭合并擦除内部标注。"
+            )
 
     def _on_class_changed(self, idx):
         if 0 <= idx < len(self.state.classes):
@@ -436,6 +537,31 @@ class EditPanel(QWidget):
     def set_undo_enabled(self, v):
         self.btn_undo.setEnabled(v)
 
+    def set_redo_enabled(self, v):
+        self.btn_redo.setEnabled(v)
+
+    def update_shortcuts(self, bindings):
+        def key(action):
+            return action_shortcut_text(bindings, action)
+
+        def compact(button, text, width):
+            return button.fontMetrics().elidedText(text, Qt.ElideRight, width)
+
+        for button, label, action in (
+            (self.btn_undo, "↩  撤销", "undo"),
+            (self.btn_redo, "↪  重做", "redo"),
+            (self.btn_save, "💾  保存", "save"),
+        ):
+            hint = compact(button, key(action), 74)
+            button.setText(f"{label}\n{hint}")
+            button.setToolTip(f"{label} ({key(action)})")
+        self.lbl_auto_fill_hint.setText(
+            "单击原图中的一点，自动填充与该点颜色相近且相连的区域。"
+            "自动连接 1–2 像素细缝并填满内部空洞。"
+            "遇到已有标注停止扩张，不穿过或覆盖已有多边形。"
+            "单击已有多边形则按其原类别补齐内部空点、孔洞及细缝。"
+            f"阈值越大，纳入的颜色范围越广；每次填充均可 {key('undo')} 撤销。")
+
     # 注意这里，保留这个空函数防止 MainWindow 报错
     def show_line_hint(self, v):
         pass
@@ -445,13 +571,31 @@ class EditPanel(QWidget):
             self.btn_line.setChecked(True)
         elif tool == DrawTool.POLY:
             self.btn_poly.setChecked(True)
-        elif tool == DrawTool.ERASER:
+        elif tool in DrawTool.ERASERS:
             self.btn_eraser.setChecked(True)
         elif tool == DrawTool.EDIT_POLY:
             self.btn_edit_poly.setChecked(True)
         elif tool == DrawTool.AUTO_FILL:
             self.btn_auto_fill.setChecked(True)
+        elif tool == DrawTool.SAMPLE_FILL:
+            self.btn_sample_fill.setChecked(True)
         self._update_tool_controls(tool)
+
+    def set_sample_fill_status(self, filled_count: int | None = None):
+        sampled = self.state.fill_sample is not None
+        self.btn_resample.setEnabled(sampled)
+        if not sampled:
+            hint = "按住左键沿样本边界拖动，松开后自动闭合取样。"
+        elif filled_count is None:
+            if self.state.fill_freehand:
+                hint = "已取样。沿填充范围的边界拖动，松开后自动闭合并填充。"
+            else:
+                hint = "已取样。拖出矩形范围，松开后填充最大的相似连通区域。"
+        elif filled_count:
+            hint = f"已填充 {filled_count} 个像素，可继续选择范围。"
+        else:
+            hint = "选区内没有可填充的连通区域。可调整阈值后重选范围。"
+        self.lbl_sample_fill_hint.setText(hint)
 
     def set_brush_value(self, value):
         self.slider_brush.setValue(value)

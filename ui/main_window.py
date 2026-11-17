@@ -4,6 +4,7 @@
 """
 
 import os
+import json
 import cv2
 import numpy as np
 
@@ -29,10 +30,12 @@ from ui.edit_panel import EditPanel
 from ui.settings_dialog import SettingsDialog, IMAGE_FILTER_OPTIONS
 from ui.delete_confirmation import confirm_delete
 from ui.overlay_shortcut import (
-    DEFAULT_OVERLAY_SHORTCUT, DEFAULT_OVERLAY_SHORTCUT_MODE, OVERLAY_SHORTCUT_MODES,
-    OverlayShortcutController, shortcut_error,
+    DEFAULT_OVERLAY_SHORTCUT_MODE, OVERLAY_SHORTCUT_MODES, OverlayShortcutController,
 )
-from core.config import DEFAULT_FILL_TOLERANCE
+from core.config import DEFAULT_FILL_TOLERANCE, DEFAULT_SAMPLE_FILL_TOLERANCE
+from ui.shortcuts import (
+    ShortcutController, load_shortcuts, shortcut_errors, normalize_shortcut, action_shortcut_text,
+)
 from ui.theme import THEMES, build_main_style
 
 
@@ -169,32 +172,34 @@ class MainWindow(QMainWindow):
 
         # ── 核心数据 ──
         self.state  = AnnotationState()
-        self.engine = DrawEngine(self.state)
+        self.engine = DrawEngine(self.state, similarity_image=self._similarity_fill_image)
         self.polygon_editor = PolygonEditor()
         self._settings = QSettings("MaskAnnotator", "MaskAnnotator")
+        eraser_tool = self._settings.value("eraser_tool", DrawTool.ERASER, type=str)
+        if eraser_tool in DrawTool.ERASERS:
+            self.state.eraser_tool = eraser_tool
         self.recursive_search = self._settings.value("recursive_search", False, type=bool)
         self.preserve_mask_structure = self._settings.value(
             "preserve_mask_structure", False, type=bool)
+        self.use_enhanced_fill_image = self._settings.value(
+            "use_enhanced_fill_image", False, type=bool)
+        self._enhanced_preview = None
         self.image_filter = self._settings.value("image_filter", "all", type=str)
         if self.image_filter not in dict(IMAGE_FILTER_OPTIONS):
             self.image_filter = "all"
+        self.shortcuts = load_shortcuts(self._settings)
+        self.mask_shortcut = self.shortcuts["overlay"]
         self.mask_shortcut_mode = self._settings.value(
             "mask_shortcut_mode", DEFAULT_OVERLAY_SHORTCUT_MODE, type=str)
         if self.mask_shortcut_mode not in dict(OVERLAY_SHORTCUT_MODES):
             self.mask_shortcut_mode = DEFAULT_OVERLAY_SHORTCUT_MODE
-        self.mask_shortcut = self._settings.value(
-            "mask_shortcut", DEFAULT_OVERLAY_SHORTCUT, type=str)
-        if shortcut_error(QKeySequence(self.mask_shortcut, QKeySequence.PortableText)):
-            self.mask_shortcut = DEFAULT_OVERLAY_SHORTCUT
-        try:
-            self.state.fill_tolerance = max(0, min(100, self._settings.value(
-                "fill_tolerance", DEFAULT_FILL_TOLERANCE, type=int)))
-        except (TypeError, ValueError):
-            self.state.fill_tolerance = DEFAULT_FILL_TOLERANCE
+        self.state.fill_tolerance = self._read_fill_tolerance(
+            "fill_tolerance", DEFAULT_FILL_TOLERANCE,
+        )
+        self.state.sample_fill_tolerance = self._read_fill_tolerance(
+            "sample_fill_tolerance", DEFAULT_SAMPLE_FILL_TOLERANCE,
+        )
         self._mask_index = None
-
-        self._last_pen_tool = DrawTool.LINE
-        self._last_pen_size = 3
 
         self.orig_folder:  str       = ""
         self.mask_folder:  str       = ""
@@ -208,9 +213,10 @@ class MainWindow(QMainWindow):
         self._theme_name = "light"
 
         self._build_ui()
+        self._shortcut_controller = ShortcutController(self)
         self._overlay_shortcut = OverlayShortcutController(
             self, self.mask_shortcut_mode, self.mask_shortcut)
-        self._update_overlay_shortcut_tooltip()
+        self._update_shortcut_hints()
         self._resize_handles = [
             ResizeHandle(self, edges, cursor)
             for edges, cursor in (
@@ -408,7 +414,7 @@ class MainWindow(QMainWindow):
         bl.setContentsMargins(16, 6, 16, 6)
         bl.setSpacing(8)
 
-        self.btn_prev = _btn("◀  上一张", "navBtn", tooltip="上一张 (← / A)")
+        self.btn_prev = _btn("◀  上一张", "navBtn", tooltip="上一张 (A)")
         self.btn_prev.setFixedWidth(96)
         self.btn_prev.setEnabled(False)
         self.btn_prev.clicked.connect(self._prev_image)
@@ -417,13 +423,13 @@ class MainWindow(QMainWindow):
         self.lbl_info.setObjectName("infoLabel")
         self.lbl_info.setAlignment(Qt.AlignCenter)
 
-        self.btn_next = _btn("下一张  ▶", "navBtn", tooltip="下一张 (→)")
+        self.btn_next = _btn("下一张  ▶", "navBtn", tooltip="下一张 (D)")
         self.btn_next.setFixedWidth(96)
         self.btn_next.setEnabled(False)
         self.btn_next.clicked.connect(self._next_image)
 
         self.btn_save_next = _btn("💾  保存并下一张", "saveNextBtn",
-                                  tooltip="保存当前掩膜并进入下一张 (D)")
+                                  tooltip="保存当前掩膜并进入下一张")
         self.btn_save_next.setFixedWidth(144)
         self.btn_save_next.setEnabled(False)
         self.btn_save_next.clicked.connect(self._save_and_next)
@@ -463,7 +469,7 @@ class MainWindow(QMainWindow):
         bl.addWidget(self.btn_delete_mask)
 
         self.btn_delete = _btn("删除图像与掩膜", "deleteBtn",
-                               tooltip="删除当前图及掩膜 (Del)")
+                               tooltip="删除当前图及掩膜")
         self.btn_delete.setFixedWidth(132)
         self.btn_delete.setEnabled(False)
         self.btn_delete.clicked.connect(self._delete_current)
@@ -559,6 +565,8 @@ class MainWindow(QMainWindow):
             self._show_edit_panel()
             self.viewer.set_edit_mode()
             self.viewer.update_cursor_state(self.state.tool, self.state.brush_size)
+            if self.use_enhanced_fill_image:
+                self._refresh_base_image()
         else:
             self.btn_edit.setText("✏  开启编辑")
             if self.edit_panel:
@@ -569,7 +577,7 @@ class MainWindow(QMainWindow):
             self.viewer.clear_stroke()
             self._clear_polygon_selection()
             if was_active and self.edit_panel:
-                self.edit_panel.set_undo_enabled(self.state.can_undo())
+                self._update_history_buttons()
             self._update_dirty_indicator()
 
     def _show_edit_panel(self):
@@ -579,19 +587,26 @@ class MainWindow(QMainWindow):
             ep.tool_changed.connect(self._on_tool_changed)
             ep.brush_changed.connect(self._on_brush_changed)
             ep.similarity_changed.connect(self._on_similarity_changed)
+            ep.fill_range_changed.connect(self._on_fill_range_changed)
+            ep.resample_requested.connect(self._resample_fill)
             ep.class_changed.connect(self._on_ep_class)
             ep.alpha_changed.connect(lambda _: self._refresh_mask_overlay())
             ep.contour_changed.connect(lambda _: self._refresh_mask_overlay())
             ep.show_all_changed.connect(lambda _: self._refresh_mask_overlay())
-            ep.brightness_changed.connect(lambda _: self._refresh_base_image())
-            ep.contrast_changed.connect(lambda _: self._refresh_base_image())
+            ep.brightness_changed.connect(self._on_image_adjustment_changed)
+            ep.contrast_changed.connect(self._on_image_adjustment_changed)
             ep.undo_requested.connect(self._undo)
+            ep.redo_requested.connect(self._redo)
             ep.save_requested.connect(self._save_mask)
             ep.close_edit_requested.connect(
                 lambda: (self.btn_edit.setChecked(False),
                          self._toggle_edit(False)))
             ep.classes_updated.connect(lambda _: self._refresh_mask_overlay())
             ep.refresh_classes()
+
+        self.edit_panel.set_tool_btn(self.state.tool)
+        self.edit_panel.update_shortcuts(self.shortcuts)
+        self._update_history_buttons()
 
         # 面板放在主窗口右侧内部，固定偏移
         geo = self.geometry()
@@ -613,6 +628,7 @@ class MainWindow(QMainWindow):
         )
 
     def _on_press(self, x, y):
+        self._cursor_pos = (int(x), int(y))
         mask = self.state.mask_img
         if mask is None or not (0 <= x < mask.shape[1] and 0 <= y < mask.shape[0]):
             return
@@ -650,13 +666,14 @@ class MainWindow(QMainWindow):
         alpha = self.edit_panel.alpha_value() if self.edit_panel else 50
         self.viewer.begin_stroke(
             x, y, self.state.tool, QColor(r, g, b, max(80, int(alpha * 2.55))),
-            self.state.brush_size,
+            self.state.brush_size, freehand=self.engine.uses_freehand_area,
         )
         if self.edit_panel:
-            self.edit_panel.set_undo_enabled(self.state.can_undo())
+            self._update_history_buttons()
         self._update_dirty_indicator()
 
     def _on_move(self, x, y):
+        self._cursor_pos = (int(x), int(y))
         if self.state.tool == DrawTool.EDIT_POLY and self.polygon_editor.is_dragging:
             mask = self.state.mask_img
             if mask is not None:
@@ -683,8 +700,13 @@ class MainWindow(QMainWindow):
             return
         if not self.engine.is_active:
             return
-        self.engine.on_release(int(x), int(y))
+        filled_count = self.engine.on_release(int(x), int(y))
         self.viewer.clear_stroke()
+        if self.state.tool == DrawTool.SAMPLE_FILL:
+            if self.edit_panel:
+                self.edit_panel.set_sample_fill_status(filled_count)
+            if not filled_count:
+                return
         self._finish_stroke_update()
 
     def _on_dbl_click(self, x, y):
@@ -700,7 +722,7 @@ class MainWindow(QMainWindow):
         self._cursor_pos = (x, y)
 
     def _auto_fill_at(self, x: int, y: int):
-        image = self.state.orig_img
+        image = self._similarity_fill_image()
         mask = self.state.mask_img
         if image is None or mask is None:
             return
@@ -714,6 +736,22 @@ class MainWindow(QMainWindow):
         self.state.mark_modified()
         self._finish_stroke_update()
 
+    def _resample_fill(self):
+        if self.state.tool == DrawTool.SAMPLE_FILL:
+            self.engine.cancel()
+            self.viewer.clear_stroke()
+        self.state.fill_sample = None
+        if self.edit_panel:
+            self.edit_panel.set_sample_fill_status()
+
+    def _on_fill_range_changed(self, freehand: bool):
+        self.state.fill_freehand = freehand
+        if self.state.tool == DrawTool.SAMPLE_FILL:
+            self.engine.cancel()
+            self.viewer.clear_stroke()
+            if self.edit_panel:
+                self.edit_panel.set_sample_fill_status()
+
     def _on_context_menu(self, x, y, global_pos):
         if (
             self.state.tool != DrawTool.EDIT_POLY
@@ -726,12 +764,12 @@ class MainWindow(QMainWindow):
         selected_vertex = self.polygon_editor.selected_vertex_index
         menu = QMenu(self)
         if hit_vertex is not None and hit_vertex == selected_vertex:
-            delete_action = menu.addAction("删除控制点\tCtrl+D")
+            delete_action = menu.addAction("删除控制点")
             delete_action.setEnabled(len(self.polygon_editor.vertices) > 3)
             if menu.exec_(global_pos) == delete_action:
                 self._delete_selected_vertex()
         elif self.polygon_editor.contains(x, y):
-            delete_action = menu.addAction("删除多边形\tCtrl+D")
+            delete_action = menu.addAction("删除多边形")
             if menu.exec_(global_pos) == delete_action:
                 self._delete_selected_polygon()
 
@@ -745,6 +783,7 @@ class MainWindow(QMainWindow):
         if self.engine.is_active:
             self.engine.cancel()
             self.viewer.clear_stroke()
+            self._update_history_buttons()
         changed = idx != self.state.current_class
         self.state.current_class = idx
         if changed or (self.edit_panel and not self.edit_panel.show_all_checked()):
@@ -757,9 +796,13 @@ class MainWindow(QMainWindow):
         self.viewer.clear_stroke()
         self._clear_polygon_selection()
         self.state.tool = tool
+        if tool in DrawTool.ERASERS:
+            self.state.eraser_tool = tool
+            self._settings.setValue("eraser_tool", tool)
+            self._settings.sync()
         self.viewer.update_cursor_state(tool, self.state.brush_size)
         if was_active and self.edit_panel:
-            self.edit_panel.set_undo_enabled(self.state.can_undo())
+            self._update_history_buttons()
         self._update_dirty_indicator()
 
     def _on_brush_changed(self, value):
@@ -769,17 +812,28 @@ class MainWindow(QMainWindow):
         self.state.brush_size = value
         self.viewer.update_cursor_state(self.state.tool, value)
         if was_active and self.edit_panel:
-            self.edit_panel.set_undo_enabled(self.state.can_undo())
+            self._update_history_buttons()
         self._update_dirty_indicator()
 
+    def _read_fill_tolerance(self, key, default):
+        try:
+            return max(0, min(100, self._settings.value(key, default, type=int)))
+        except (TypeError, ValueError):
+            return default
+
     def _on_similarity_changed(self, value):
-        self.state.fill_tolerance = max(0, min(100, int(value)))
-        self._settings.setValue("fill_tolerance", self.state.fill_tolerance)
+        tolerance = max(0, min(100, int(value)))
+        if self.state.tool == DrawTool.SAMPLE_FILL:
+            self.state.sample_fill_tolerance = tolerance
+            self._settings.setValue("sample_fill_tolerance", tolerance)
+        else:
+            self.state.fill_tolerance = tolerance
+            self._settings.setValue("fill_tolerance", tolerance)
         self._settings.sync()
 
     def _refresh_stats(self):
         if self.edit_panel:
-            self.edit_panel.set_undo_enabled(self.state.can_undo())
+            self._update_history_buttons()
             self.edit_panel.set_stats(
                 class_pixel_stats_str(self.state.mask_img, self.state.classes))
 
@@ -838,18 +892,37 @@ class MainWindow(QMainWindow):
     # ──────────────────────────────────────────────────────────────────────────
     # 显示刷新
     # ──────────────────────────────────────────────────────────────────────────
-    def _refresh_base_image(self, reset_zoom=False, *args):
-        if self.state.orig_img is None:
-            return
+    def _display_image(self) -> np.ndarray | None:
+        original = self.state.orig_img
+        if original is None:
+            self._enhanced_preview = None
+            return None
         ep = self.edit_panel
-        brightness = ep.brightness_value() if ep and ep.isVisible() else 0
-        contrast   = ep.contrast_value()   if ep and ep.isVisible() else 100
-
-        img = adjust_brightness_contrast(
-            self.state.orig_img,
-            brightness=brightness,
-            contrast=contrast / 100.0
+        brightness, contrast = (
+            (ep.brightness_value(), ep.contrast_value()) if ep and ep.isVisible() else (0, 100)
         )
+        adjustment = (brightness, contrast)
+        cached = self._enhanced_preview
+        if cached is not None and cached[0] is original and cached[1] == adjustment:
+            return cached[2]
+        self._enhanced_preview = None
+        image = adjust_brightness_contrast(original, brightness=brightness, contrast=contrast / 100.0)
+        if self.use_enhanced_fill_image and image is not original:
+            self._enhanced_preview = (original, adjustment, image)
+        return image
+
+    def _similarity_fill_image(self) -> np.ndarray | None:
+        return self._display_image() if self.use_enhanced_fill_image else self.state.orig_img
+
+    def _on_image_adjustment_changed(self, _value):
+        if self.use_enhanced_fill_image:
+            self._resample_fill()
+        self._refresh_base_image()
+
+    def _refresh_base_image(self, reset_zoom=False, *args):
+        img = self._display_image()
+        if img is None:
+            return
 
         rgb  = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
@@ -895,7 +968,6 @@ class MainWindow(QMainWindow):
     # 掩膜可见切换
     # ──────────────────────────────────────────────────────────────────────────
     def _toggle_mask_visible(self):
-        # 鼠标主动切换时结束临时反转，以此次点击选择的状态为准。
         visible = self.btn_mask_vis.isChecked()
         self._overlay_shortcut.restore()
         self._set_mask_visible(visible)
@@ -905,42 +977,76 @@ class MainWindow(QMainWindow):
         self.btn_mask_vis.setChecked(bool(visible))
         self.viewer.set_overlay_visible(bool(visible))
 
-    def _update_overlay_shortcut_tooltip(self):
-        key = QKeySequence(self.mask_shortcut).toString(QKeySequence.NativeText)
-        action = "按住暂时反转，松开恢复" if self.mask_shortcut_mode == "hold" else "按键切换显示"
-        self.btn_mask_vis.setToolTip(f"{action} ({key})；可在设置中修改")
-
     def _apply_overlay_settings(self, mode, shortcut):
-        sequence = QKeySequence(shortcut, QKeySequence.PortableText)
-        if mode not in dict(OVERLAY_SHORTCUT_MODES) or shortcut_error(sequence):
+        bindings = dict(self.shortcuts)
+        bindings["overlay"] = shortcut
+        return self._apply_shortcut_settings(bindings, mode)
+
+    def _apply_shortcut_settings(self, bindings, mask_shortcut_mode=None):
+        mode = self.mask_shortcut_mode if mask_shortcut_mode is None else mask_shortcut_mode
+        if mode not in dict(OVERLAY_SHORTCUT_MODES) or shortcut_errors(bindings):
             return False
-        self._overlay_shortcut.configure(mode, shortcut)
+        self._overlay_shortcut.configure(mode, bindings["overlay"])
+        self.shortcuts = {name: normalize_shortcut(value) for name, value in bindings.items()}
+        self.mask_shortcut = self.shortcuts["overlay"]
         self.mask_shortcut_mode = mode
-        self.mask_shortcut = sequence.toString(QKeySequence.PortableText)
+        self._settings.setValue("shortcuts", json.dumps(self.shortcuts, ensure_ascii=False))
         self._settings.setValue("mask_shortcut_mode", mode)
         self._settings.setValue("mask_shortcut", self.mask_shortcut)
         self._settings.sync()
-        self._update_overlay_shortcut_tooltip()
+        self._update_shortcut_hints()
         return True
+
+    def _shortcut_text(self, action):
+        return action_shortcut_text(self.shortcuts, action)
+
+    def _update_shortcut_hints(self):
+        key = QKeySequence(self.mask_shortcut).toString(QKeySequence.NativeText)
+        action = "按住暂时反转，松开恢复" if self.mask_shortcut_mode == "hold" else "按键切换显示"
+        self.btn_mask_vis.setToolTip(f"{action} ({key})；可在设置中修改")
+        for button, text, action in (
+            (self.btn_prev, "上一张", "previous"),
+            (self.btn_next, "下一张", "next"),
+        ):
+            button.setToolTip(f"{text} ({self._shortcut_text(action)})")
+        if self.edit_panel:
+            self.edit_panel.update_shortcuts(self.shortcuts)
+
+    def _update_history_buttons(self):
+        if self.edit_panel:
+            self.edit_panel.set_undo_enabled(self.state.can_undo())
+            self.edit_panel.set_redo_enabled(self.state.can_redo())
 
     # ──────────────────────────────────────────────────────────────────────────
     # 撤销 / 折线
     # ──────────────────────────────────────────────────────────────────────────
     def _undo(self):
+        if self.engine.is_active:
+            if self.state.tool == DrawTool.SAMPLE_FILL:
+                self.engine.cancel()
+            else:
+                self.engine.on_release(*(self._cursor_pos or (0, 0)))
+            self.viewer.clear_stroke()
         if self.state.pop_undo():
             self._clear_polygon_selection()
-            if self.edit_panel:
-                self.edit_panel.set_undo_enabled(self.state.can_undo())
             self.viewer.clear_stroke()
-            self._refresh_mask_overlay()
-            self._refresh_stats()
-            self._update_dirty_indicator()
+            self._finish_stroke_update()
+            if self.edit_panel and self.state.tool == DrawTool.SAMPLE_FILL:
+                self.edit_panel.set_sample_fill_status()
+
+    def _redo(self):
+        if self.engine.is_active or self.polygon_editor.is_dragging:
+            return
+        if self.state.pop_redo():
+            self._clear_polygon_selection()
+            self.viewer.clear_stroke()
+            self._finish_stroke_update()
 
     def _commit_line(self):
         if self.engine.is_active and self._cursor_pos is not None:
             self.engine.on_release(*self._cursor_pos)
         self.viewer.clear_stroke()
-        self._post_draw()
+        self._finish_stroke_update()
 
     def _cancel_line(self):
         if self.polygon_editor.is_dragging:
@@ -949,8 +1055,7 @@ class MainWindow(QMainWindow):
             return
         self.engine.cancel()
         self.viewer.clear_stroke()
-        if self.edit_panel:
-            self.edit_panel.set_undo_enabled(self.state.can_undo())
+        self._update_history_buttons()
         self._update_dirty_indicator()
 
     def _clear_polygon_selection(self):
@@ -994,12 +1099,19 @@ class MainWindow(QMainWindow):
     def _open_settings(self):
         dialog = SettingsDialog(self.recursive_search, self.preserve_mask_structure,
                                 self._theme_name, self, image_filter=self.image_filter,
+                                shortcuts=self.shortcuts, mask_shortcut=self.mask_shortcut,
                                 mask_shortcut_mode=self.mask_shortcut_mode,
-                                mask_shortcut=self.mask_shortcut)
+                                use_enhanced_fill_image=self.use_enhanced_fill_image)
 
         def save():
-            if dialog.validate_overlay_shortcut() and self._apply_folder_settings(*dialog.values()):
-                self._apply_overlay_settings(*dialog.overlay_values())
+            if dialog.validate_shortcuts() and self._apply_folder_settings(*dialog.values()):
+                use_enhanced = dialog.chk_use_enhanced_fill_image.isChecked()
+                if use_enhanced != self.use_enhanced_fill_image:
+                    self.use_enhanced_fill_image = use_enhanced
+                    self._settings.setValue("use_enhanced_fill_image", use_enhanced)
+                    self._enhanced_preview = None
+                    self._resample_fill()
+                self._apply_shortcut_settings(dialog.shortcut_values(), dialog.overlay_values()[0])
                 dialog.accept()
 
         dialog.save_requested.connect(save)
@@ -1108,8 +1220,10 @@ class MainWindow(QMainWindow):
             self.engine.cancel()
             self._clear_polygon_selection()
             self.state.orig_img = None
+            self._enhanced_preview = None
             self.state.mask_img = None
-            self.state.undo_stack.clear()
+            self.state.fill_sample = None
+            self.state.clear_history()
             self.state.mark_saved()
             self.viewer.clear_image()
             self.lbl_info.setText("—  /  —")
@@ -1129,8 +1243,9 @@ class MainWindow(QMainWindow):
             self.btn_delete_mask.setEnabled(False)
             self.btn_delete.setEnabled(False)
             if self.edit_panel:
-                self.edit_panel.set_undo_enabled(False)
+                self._update_history_buttons()
                 self.edit_panel.set_stats("")
+                self.edit_panel.set_sample_fill_status()
 
     def _navigate_to(self, filename):
         # 保存可能使当前图片离开“无掩膜”列表，按文件名定位以免跳过下一张。
@@ -1202,8 +1317,9 @@ class MainWindow(QMainWindow):
         self.btn_save_next.setEnabled(True)
 
         if self.edit_panel:
-            self.edit_panel.set_undo_enabled(False)
+            self._update_history_buttons()
             self.edit_panel.show_line_hint(False)
+            self.edit_panel.set_sample_fill_status()
             self.edit_panel.set_stats(
                 class_pixel_stats_str(self.state.mask_img, self.state.classes))
 
@@ -1324,7 +1440,7 @@ class MainWindow(QMainWindow):
             self.state.load_image_and_mask(self.state.orig_img, None)
             self._clear_polygon_selection()
             if self.edit_panel:
-                self.edit_panel.set_undo_enabled(False)
+                self._update_history_buttons()
             self._refresh_mask_overlay()
             self._refresh_stats()
             self._update_dirty_indicator()
@@ -1360,100 +1476,14 @@ class MainWindow(QMainWindow):
     # ──────────────────────────────────────────────────────────────────────────
     # 快捷键
     # ──────────────────────────────────────────────────────────────────────────
-    def keyPressEvent(self, event):
-            key = event.key()
-            mods = event.modifiers()
-            ep_on = self.edit_panel and self.edit_panel.isVisible()
-
-            if key in (Qt.Key_Left, Qt.Key_A):
-                self._prev_image()
-            elif key == Qt.Key_Right:
-                self._next_image()
-            elif key == Qt.Key_D and not (mods & Qt.ControlModifier):
-                self._save_and_next()
-            elif ep_on and not (mods & Qt.AltModifier) and key == Qt.Key_1:
-                self.engine.cancel()
-                self.viewer.clear_stroke()
-                self._clear_polygon_selection()
-                self.edit_panel.set_tool_btn(DrawTool.LINE)
-                self.state.tool = DrawTool.LINE
-                self.state.brush_size = 3
-                self.edit_panel.set_brush_value(3)
-                self.viewer.update_cursor_state(self.state.tool, self.state.brush_size)
-
-            elif ep_on and not (mods & Qt.AltModifier) and key == Qt.Key_2:
-                self.engine.cancel()
-                self.viewer.clear_stroke()
-                self._clear_polygon_selection()
-                self.edit_panel.set_tool_btn(DrawTool.POLY)
-                self.state.tool = DrawTool.POLY
-                self.state.brush_size = 1
-                self.edit_panel.set_brush_value(1)
-                self.viewer.update_cursor_state(self.state.tool, self.state.brush_size)
-
-            elif ep_on and not (mods & Qt.AltModifier) and key in (Qt.Key_E, Qt.Key_3):
-                self.engine.cancel()
-                self.viewer.clear_stroke()
-                self._clear_polygon_selection()
-
-                if self.state.tool == DrawTool.ERASER:
-                    self.state.tool = self._last_pen_tool
-                    self.state.brush_size = self._last_pen_size
-                    self.edit_panel.set_tool_btn(self.state.tool)
-                    self.edit_panel.set_brush_value(self.state.brush_size)
-                else:
-                    self._last_pen_tool = self.state.tool
-                    self._last_pen_size = self.state.brush_size
-                    self.state.tool = DrawTool.ERASER
-                    self.state.brush_size = 20
-                    self.edit_panel.set_tool_btn(DrawTool.ERASER)
-                    self.edit_panel.set_brush_value(20)
-
-                self.viewer.update_cursor_state(self.state.tool, self.state.brush_size)
-
-            elif ep_on and not (mods & Qt.AltModifier) and key == Qt.Key_4:
-                self.engine.cancel()
-                self.viewer.clear_stroke()
-                self._clear_polygon_selection()
-                self.edit_panel.set_tool_btn(DrawTool.EDIT_POLY)
-                self.state.tool = DrawTool.EDIT_POLY
-                self.viewer.update_cursor_state(self.state.tool, self.state.brush_size)
-
-            elif ep_on and not (mods & Qt.AltModifier) and key == Qt.Key_5:
-                self.engine.cancel()
-                self.viewer.clear_stroke()
-                self._clear_polygon_selection()
-                self.edit_panel.set_tool_btn(DrawTool.AUTO_FILL)
-                self.state.tool = DrawTool.AUTO_FILL
-                self.viewer.update_cursor_state(self.state.tool, self.state.brush_size)
-
-            elif key in (Qt.Key_Return, Qt.Key_Enter):
-                if self.state.tool == DrawTool.LINE:
-                    self._commit_line()
-            elif key == Qt.Key_Escape:
-                self._cancel_line()
-            elif key in (Qt.Key_F, Qt.Key_0):
-                self.viewer.fit_image()
-            elif ep_on and key in (Qt.Key_BracketLeft, Qt.Key_BracketRight):
-                delta = -1 if key == Qt.Key_BracketLeft else 1
-                if self.state.tool == DrawTool.AUTO_FILL:
-                    self.edit_panel.set_similarity_value(
-                        max(0, min(100, self.state.fill_tolerance + delta)))
-                else:
-                    self.edit_panel.set_brush_value(
-                        max(1, min(80, self.state.brush_size + delta)))
-            elif ep_on and (mods & Qt.AltModifier) and Qt.Key_1 <= key <= Qt.Key_9:
-                idx = key - Qt.Key_1
-                if idx < len(self.state.classes):
-                    self.edit_panel.set_class_index(idx)
-            elif mods == Qt.ControlModifier and key == Qt.Key_S:
-                self._save_mask()
-            elif mods == Qt.ControlModifier and key == Qt.Key_Z:
-                self._undo()
-            elif mods == Qt.ControlModifier and key == Qt.Key_D:
-                self._delete_selection()
-            elif key == Qt.Key_Delete:
-                self._delete_current()
+    def _trigger_shortcut(self, action):
+        callbacks = {
+            "previous": self._prev_image, "next": self._next_image,
+            "save": self._save_mask,
+            "undo": self._undo, "redo": self._redo,
+        }
+        if action in callbacks:
+            callbacks[action]()
 
     def closeEvent(self, event):
         if not self._confirm_save_if_dirty():

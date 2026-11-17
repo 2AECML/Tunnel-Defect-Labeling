@@ -132,12 +132,13 @@ def adjust_brightness_contrast(
 ) -> np.ndarray:
     """
     调整图像亮度和对比度。
-    brightness : 偏移量 (-100 ~ 100)
-    contrast   : 对比度倍数 (0.1 ~ 3.0)
+    brightness : 缩放后叠加的偏移量 (-100 ~ 100)
+    contrast   : 以中灰 128 为中心的对比度倍数 (0.1 ~ 3.0)
     """
     if brightness == 0 and contrast == 1.0:
         return img
-    return cv2.convertScaleAbs(img, alpha=contrast, beta=brightness)
+    offset = brightness + 128.0 * (1.0 - contrast)
+    return cv2.addWeighted(img, contrast, img, 0.0, offset, dtype=cv2.CV_8U)
 
 
 def class_pixel_stats_str(mask_img: np.ndarray, classes: list) -> str:

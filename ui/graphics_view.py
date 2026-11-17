@@ -4,7 +4,7 @@ from PyQt5.QtWidgets import (
     QGraphicsEllipseItem, QGraphicsPathItem, QGraphicsItem, QApplication,
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QPoint
-from PyQt5.QtGui import QPainter, QPixmap, QPen, QPainterPath, QColor
+from PyQt5.QtGui import QPainter, QPixmap, QPen, QPainterPath, QColor, QBrush
 from core.config import DrawTool
 
 class InteractiveGraphicsView(QGraphicsView):
@@ -36,6 +36,8 @@ class InteractiveGraphicsView(QGraphicsView):
         self.stroke_item.hide()
         self._scene.addItem(self.stroke_item)
         self._stroke_path = QPainterPath()
+        self._rectangular_stroke = False
+        self._stroke_start = (0, 0)
 
         # 已有多边形编辑轮廓与顶点控制柄。
         self.polygon_edit_item = QGraphicsPathItem()
@@ -131,9 +133,22 @@ class InteractiveGraphicsView(QGraphicsView):
     def set_overlay_visible(self, visible: bool):
         self.overlay_item.setVisible(visible)
 
-    def begin_stroke(self, x: int, y: int, tool: str, color: QColor, width: int):
+    def begin_stroke(self, x: int, y: int, tool: str, color: QColor, width: int, *, freehand=False):
+        self.clear_stroke()
+        self._rectangular_stroke = tool in DrawTool.RECTANGLE_TOOLS and not freehand
+        self._stroke_start = (x, y)
         self._stroke_path = QPainterPath()
         self._stroke_path.moveTo(x, y)
+        if tool in DrawTool.AREA_ERASERS or tool == DrawTool.SAMPLE_FILL:
+            style = Qt.DashLine if self._rectangular_stroke else Qt.SolidLine
+            pen = QPen(QColor(0, 155, 235), 1.5, style)
+            pen.setCosmetic(True)
+            self.stroke_item.setPen(pen)
+            if self._rectangular_stroke:
+                self.stroke_item.setBrush(QColor(65, 170, 255, 55))
+            self.stroke_item.setPath(self._stroke_path)
+            self.stroke_item.show()
+            return
         pen_color = QColor(255, 255, 255, 220) if tool == DrawTool.ERASER else color
         pen = QPen(pen_color, max(1, width), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
         if tool == DrawTool.ERASER:
@@ -145,11 +160,21 @@ class InteractiveGraphicsView(QGraphicsView):
     def extend_stroke(self, x: int, y: int):
         if not self.stroke_item.isVisible():
             return
+        if self._rectangular_stroke:
+            start_x, start_y = self._stroke_start
+            path = QPainterPath()
+            path.addRect(min(start_x, x), min(start_y, y),
+                         abs(x - start_x) + 1, abs(y - start_y) + 1)
+            self.stroke_item.setPath(path)
+            return
         self._stroke_path.lineTo(x, y)
+        # 面状选区只显示实际拖过的轨迹，自动闭合留到松开时处理。
         self.stroke_item.setPath(self._stroke_path)
 
     def clear_stroke(self):
         self.stroke_item.hide()
+        self._rectangular_stroke = False
+        self.stroke_item.setBrush(QBrush())
         self._stroke_path = QPainterPath()
         self.stroke_item.setPath(self._stroke_path)
 

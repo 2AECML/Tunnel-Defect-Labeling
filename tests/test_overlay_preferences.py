@@ -256,12 +256,12 @@ def test_tolerance_manual_input_slider_and_reopened_window_stay_in_sync(windows,
     window.viewer.setFocus()
     QApplication.processEvents()
     qtbot.keyClick(window, Qt.Key_BracketRight)
-    assert spin.value() == 43
-    assert settings.value("fill_tolerance", type=int) == 43
+    assert spin.value() == 42
+    assert settings.value("fill_tolerance", type=int) == 42
     restored = create()
     restored.btn_edit.click()
-    assert restored.state.fill_tolerance == 43
-    assert restored.edit_panel.slider_similarity.spin_value.value() == 43
+    assert restored.state.fill_tolerance == 42
+    assert restored.edit_panel.slider_similarity.spin_value.value() == 42
 
 
 def test_fill_uses_manually_entered_tolerance(windows):
@@ -279,6 +279,27 @@ def test_fill_uses_manually_entered_tolerance(windows):
     spin.setValue(50)
     window._on_press(1, 1)
     assert np.all(window.state.mask_img != 0)
+
+
+def test_sample_fill_remembers_lab_tolerance_separately(windows):
+    create, settings = windows
+    settings.setValue("fill_tolerance", 41)
+    window = create()
+    window.btn_edit.click()
+    panel = window.edit_panel
+    panel.btn_sample_fill.click()
+    assert panel.slider_similarity.spin_value.value() == 8
+
+    panel.slider_similarity.spin_value.setValue(12)
+    assert settings.value("sample_fill_tolerance", type=int) == 12
+    panel.btn_auto_fill.click()
+    assert panel.slider_similarity.spin_value.value() == 41
+    assert settings.value("fill_tolerance", type=int) == 41
+
+    restored = create()
+    restored.btn_edit.click()
+    restored.edit_panel.btn_sample_fill.click()
+    assert restored.edit_panel.slider_similarity.spin_value.value() == 12
 
 
 @pytest.mark.parametrize("theme", ["light", "dark"])

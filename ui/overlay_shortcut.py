@@ -6,6 +6,7 @@ from PyQt5.QtWidgets import (
     QApplication, QAbstractSpinBox, QComboBox, QKeySequenceEdit,
     QLineEdit, QPlainTextEdit, QTextEdit, QWidget,
 )
+from ui.shortcuts import DEFAULT_SHORTCUTS, sequence_error, shortcut_errors
 
 
 OVERLAY_SHORTCUT_MODES = (("hold", "长按模式"), ("toggle", "点击模式"))
@@ -16,26 +17,15 @@ _MODIFIER_KEYS = {
     Qt.Key_Control: Qt.ControlModifier, Qt.Key_Shift: Qt.ShiftModifier,
     Qt.Key_Alt: Qt.AltModifier, Qt.Key_Meta: Qt.MetaModifier,
 }
-_RESERVED = {
-    int(QKeySequence(text)[0])
-    for text in ("Left", "Right", "A", "D", "1", "2", "3", "4", "5", "E", "F", "0",
-                 "Return", "Enter", "Esc", "[", "]", "Ctrl+S", "Ctrl+Z", "Ctrl+D",
-                 "Tab", "Shift+Tab", *(f"Alt+{number}" for number in range(1, 10)))
-}
 
 
-def shortcut_error(sequence: QKeySequence) -> str:
-    if sequence.isEmpty():
-        return "请设置一个快捷键。"
-    if sequence.count() != 1:
-        return "请使用单个按键或一组组合键，例如 C、Ctrl+C。"
-    chord = int(sequence[0])
-    key = chord & ~_MODIFIER_MASK
-    if key in (0, Qt.Key_unknown, *_MODIFIER_KEYS):
-        return "快捷键需要包含一个普通按键，例如 C、Ctrl+C。"
-    if chord in _RESERVED:
-        return "该快捷键已用于导航、绘图或编辑，请选择其他按键。"
-    return ""
+def shortcut_error(sequence: QKeySequence, bindings=None) -> str:
+    error = sequence_error(sequence)
+    if error:
+        return error
+    candidate = dict(DEFAULT_SHORTCUTS if bindings is None else bindings)
+    candidate["overlay"] = sequence.toString(QKeySequence.PortableText)
+    return shortcut_errors(candidate).get("overlay", "")
 
 
 class OverlayShortcutController(QObject):

@@ -1,4 +1,4 @@
-"""文件查找与掩膜保存偏好设置。"""
+"""标注软件的偏好设置。"""
 
 from PyQt5.QtCore import Qt, QRectF, QSize, pyqtSignal
 from PyQt5.QtGui import QColor, QPainter, QPen, QKeySequence
@@ -8,10 +8,10 @@ from PyQt5.QtWidgets import (
 )
 
 from ui.theme import THEMES, build_control_style
+from ui.shortcuts import SHORTCUTS, DEFAULT_SHORTCUTS, shortcut_errors
 from ui.styled_controls import ThemedComboBox
 from ui.overlay_shortcut import (
-    DEFAULT_OVERLAY_SHORTCUT, DEFAULT_OVERLAY_SHORTCUT_MODE,
-    OVERLAY_SHORTCUT_MODES, shortcut_error,
+    DEFAULT_OVERLAY_SHORTCUT, DEFAULT_OVERLAY_SHORTCUT_MODE, OVERLAY_SHORTCUT_MODES,
 )
 
 IMAGE_FILTER_OPTIONS = (
@@ -57,16 +57,16 @@ class SettingsDialog(QDialog):
     save_requested = pyqtSignal()
 
     def __init__(self, recursive_search=False, preserve_mask_structure=False,
-                 theme_name="light", parent=None, image_filter="all",
+                 theme_name="light", parent=None, image_filter="all", shortcuts=None,
                  mask_shortcut_mode=DEFAULT_OVERLAY_SHORTCUT_MODE,
-                 mask_shortcut=DEFAULT_OVERLAY_SHORTCUT):
+                 mask_shortcut=DEFAULT_OVERLAY_SHORTCUT, *, use_enhanced_fill_image=False):
         super().__init__(parent)
         self.setWindowTitle("设置")
         self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
         self.setObjectName("settingsDialog")
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(600)
         self.setMinimumHeight(360)
-        self.resize(600, min(760, max(360, self.screen().availableGeometry().height() - 70)))
+        self.resize(660, min(760, max(360, self.screen().availableGeometry().height() - 70)))
         t = THEMES[theme_name]
         self.setStyleSheet(self._style(t))
 
@@ -84,7 +84,7 @@ class SettingsDialog(QDialog):
         title = QLabel("设置")
         title.setObjectName("settingsTitle")
         layout.addWidget(title)
-        subtitle = QLabel("管理文件查找、掩膜保存与快捷键")
+        subtitle = QLabel("管理文件查找、掩膜保存、相似填充与快捷键")
         subtitle.setObjectName("settingsSubtitle")
         layout.addWidget(subtitle)
         layout.addSpacing(12)
@@ -150,42 +150,79 @@ class SettingsDialog(QDialog):
         layout.addWidget(save_card)
 
         layout.addSpacing(8)
-        layout.addWidget(self._section_label("掩膜叠加快捷键"))
+        layout.addWidget(self._section_label("相似填充"))
+        fill_card, fill_layout = self._card()
+        self.chk_use_enhanced_fill_image = ToggleSwitch("使用增强图像", t)
+        self.chk_use_enhanced_fill_image.setChecked(use_enhanced_fill_image)
+        fill_layout.addLayout(self._option_row(
+            "使用增强图像", "按当前底图的亮度和对比度取样和匹配。关闭时使用原图。",
+            self.chk_use_enhanced_fill_image))
+        layout.addWidget(fill_card)
+
+        layout.addSpacing(8)
+        layout.addWidget(self._section_label("快捷键"))
         shortcut_card, shortcut_layout = self._card()
-        self.combo_mask_shortcut_mode = ThemedComboBox()
-        for value, text in OVERLAY_SHORTCUT_MODES:
-            self.combo_mask_shortcut_mode.addItem(text, value)
-        index = self.combo_mask_shortcut_mode.findData(mask_shortcut_mode)
-        self.combo_mask_shortcut_mode.setCurrentIndex(max(0, index))
-        self.combo_mask_shortcut_mode.setMinimumWidth(140)
-        shortcut_layout.addLayout(self._option_row(
-            "触发模式", "长按时临时反转，松开恢复；点击时切换后保持。",
-            self.combo_mask_shortcut_mode))
-        binding_row = QHBoxLayout()
-        binding_label = QLabel("快捷键")
-        binding_label.setObjectName("settingsOption")
-        binding_row.addWidget(binding_label)
-        binding_row.addStretch()
-        self.key_mask_shortcut = QKeySequenceEdit(QKeySequence(mask_shortcut))
-        self.key_mask_shortcut.setAccessibleName("掩膜叠加快捷键")
-        self.key_mask_shortcut.setFixedWidth(180)
-        binding_label.setBuddy(self.key_mask_shortcut)
-        binding_row.addWidget(self.key_mask_shortcut)
-        self.btn_reset_shortcut = QPushButton("恢复 C")
-        self.btn_reset_shortcut.setAutoDefault(False)
-        self.btn_reset_shortcut.clicked.connect(
-            lambda: self.key_mask_shortcut.setKeySequence(QKeySequence(DEFAULT_OVERLAY_SHORTCUT)))
-        binding_row.addWidget(self.btn_reset_shortcut)
-        shortcut_layout.addLayout(binding_row)
-        shortcut_hint = QLabel("点击输入框后按下按键，支持 C、Ctrl+C 等单组快捷键。")
+        bindings = dict(DEFAULT_SHORTCUTS)
+        bindings["overlay"] = mask_shortcut
+        if shortcuts is not None:
+            bindings.update(shortcuts)
+        self.shortcut_editors = {}
+        self.shortcut_reset_buttons = {}
+
+        def add_binding(item, target):
+            row = QHBoxLayout()
+            label = QLabel(item.label)
+            label.setObjectName("settingsOption")
+            row.addWidget(label, 1)
+            editor = QKeySequenceEdit(QKeySequence(bindings[item.name]))
+            editor.setAccessibleName(f"{item.label}快捷键")
+            editor.setFixedWidth(170)
+            label.setBuddy(editor)
+            row.addWidget(editor)
+            reset = QPushButton("恢复默认")
+            reset.setAccessibleName(f"恢复{item.label}默认快捷键")
+            reset.setToolTip(f"默认：{QKeySequence(item.default).toString(QKeySequence.NativeText)}")
+            reset.setAutoDefault(False)
+            reset.clicked.connect(lambda: editor.setKeySequence(QKeySequence(item.default)))
+            row.addWidget(reset)
+            self.shortcut_editors[item.name] = editor
+            self.shortcut_reset_buttons[item.name] = reset
+            target.addLayout(row)
+
+        for item in SHORTCUTS:
+            if item.name != "overlay":
+                add_binding(item, shortcut_layout)
+        shortcut_hint = QLabel("点击输入框后按下按键，支持单键或一组组合键。每项均可恢复默认；保存后生效。")
         shortcut_hint.setObjectName("settingsDescription")
         shortcut_hint.setWordWrap(True)
         shortcut_layout.addWidget(shortcut_hint)
         self.lbl_shortcut_error = QLabel()
         self.lbl_shortcut_error.setWordWrap(True)
         self.lbl_shortcut_error.setStyleSheet(f"color: {t['text_red']};")
-        shortcut_layout.addWidget(self.lbl_shortcut_error)
         layout.addWidget(shortcut_card)
+
+        layout.addSpacing(8)
+        layout.addWidget(self._section_label("掩膜叠加快捷键"))
+        overlay_card, overlay_layout = self._card()
+        self.combo_mask_shortcut_mode = ThemedComboBox()
+        for value, text in OVERLAY_SHORTCUT_MODES:
+            self.combo_mask_shortcut_mode.addItem(text, value)
+        index = self.combo_mask_shortcut_mode.findData(mask_shortcut_mode)
+        self.combo_mask_shortcut_mode.setCurrentIndex(max(0, index))
+        self.combo_mask_shortcut_mode.setMinimumWidth(140)
+        overlay_layout.addLayout(self._option_row(
+            "触发模式", "长按时临时反转，松开恢复；点击时切换后保持。",
+            self.combo_mask_shortcut_mode))
+        add_binding(next(item for item in SHORTCUTS if item.name == "overlay"), overlay_layout)
+        self.key_mask_shortcut = self.shortcut_editors["overlay"]
+        self.btn_reset_shortcut = self.shortcut_reset_buttons["overlay"]
+        self.btn_reset_shortcut.setText("恢复 C")
+        overlay_hint = QLabel("点击输入框后按下按键，支持 C、Ctrl+C 等单组快捷键。")
+        overlay_hint.setObjectName("settingsDescription")
+        overlay_hint.setWordWrap(True)
+        overlay_layout.addWidget(overlay_hint)
+        layout.addWidget(overlay_card)
+
         layout.addStretch(1)
         layout.addSpacing(8)
 
@@ -193,6 +230,8 @@ class SettingsDialog(QDialog):
         footer.setContentsMargins(28, 12, 28, 20)
         remember = QLabel("保存后自动记住偏好")
         remember.setObjectName("settingsHint")
+        outer.addWidget(self.lbl_shortcut_error)
+        self.lbl_shortcut_error.setContentsMargins(28, 4, 28, 4)
         footer.addWidget(remember)
         footer.addStretch()
         self.btn_cancel = QPushButton("取消")
@@ -204,14 +243,21 @@ class SettingsDialog(QDialog):
         self.btn_save.clicked.connect(self.save_requested)
         footer.addWidget(self.btn_save)
         outer.addLayout(footer)
-        self.key_mask_shortcut.keySequenceChanged.connect(self.validate_overlay_shortcut)
-        self.validate_overlay_shortcut()
+        for editor in self.shortcut_editors.values():
+            editor.keySequenceChanged.connect(self.validate_shortcuts)
+        self.validate_shortcuts()
         self.setTabOrder(self.chk_recursive, self.filter_buttons["all"])
         self.setTabOrder(self.filter_buttons["without_mask"], self.chk_preserve_structure)
-        self.setTabOrder(self.chk_preserve_structure, self.combo_mask_shortcut_mode)
-        self.setTabOrder(self.combo_mask_shortcut_mode, self.key_mask_shortcut)
-        self.setTabOrder(self.key_mask_shortcut, self.btn_reset_shortcut)
-        self.setTabOrder(self.btn_reset_shortcut, self.btn_cancel)
+        self.setTabOrder(self.chk_preserve_structure, self.chk_use_enhanced_fill_image)
+        previous = self.chk_use_enhanced_fill_image
+        for name, editor in self.shortcut_editors.items():
+            if name == "overlay":
+                self.setTabOrder(previous, self.combo_mask_shortcut_mode)
+                previous = self.combo_mask_shortcut_mode
+            self.setTabOrder(previous, editor)
+            previous = self.shortcut_reset_buttons[name]
+            self.setTabOrder(editor, previous)
+        self.setTabOrder(previous, self.btn_cancel)
         self.setTabOrder(self.btn_cancel, self.btn_save)
 
     @staticmethod
@@ -258,12 +304,23 @@ class SettingsDialog(QDialog):
         return (self.chk_recursive.isChecked(), self.chk_preserve_structure.isChecked(),
                 image_filter)
 
+    def shortcut_values(self):
+        return {name: editor.keySequence().toString(QKeySequence.PortableText)
+                for name, editor in self.shortcut_editors.items()}
+
     def overlay_values(self):
         return (self.combo_mask_shortcut_mode.currentData(),
                 self.key_mask_shortcut.keySequence().toString(QKeySequence.PortableText))
 
     def validate_overlay_shortcut(self):
-        error = shortcut_error(self.key_mask_shortcut.keySequence())
+        return self.validate_shortcuts()
+
+    def validate_shortcuts(self):
+        errors = shortcut_errors(self.shortcut_values())
+        error = next(iter(errors.values()), "")
+        for name, editor in self.shortcut_editors.items():
+            editor.setToolTip(errors.get(name, ""))
+            editor.setStyleSheet("border: 1px solid #cf4343;" if name in errors else "")
         self.lbl_shortcut_error.setText(error)
         self.lbl_shortcut_error.setVisible(bool(error))
         self.btn_save.setEnabled(not error)

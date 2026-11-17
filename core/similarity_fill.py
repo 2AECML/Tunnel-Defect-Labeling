@@ -1,9 +1,68 @@
-"""基于原图颜色相似度的连通区域填充。"""
+"""基于原图颜色的连通填充与区域取样筛选。"""
 
 from __future__ import annotations
 
 import cv2
 import numpy as np
+
+
+def _to_lab(image: np.ndarray) -> np.ndarray:
+    bgr = image.astype(np.float32)
+    bgr /= 255.0
+    return cv2.cvtColor(bgr, cv2.COLOR_BGR2Lab)
+
+
+def sample_lab_centers(pixels: np.ndarray) -> np.ndarray:
+    """从样本中提取 Lab 颜色中心，忽略占比不足 10% 的色簇。"""
+    lab = _to_lab(pixels.reshape(-1, 1, 3)).reshape(-1, 3)
+    low, high = lab.min(axis=0), lab.max(axis=0)
+    channel = int(np.argmax(high - low))
+    if low[channel] == high[channel]:
+        return lab[:1].copy()
+
+    # 沿变化最大的通道初始化两组，让同一取样重复计算时结果一致。
+    midpoint = (low[channel] + high[channel]) / 2
+    labels = (lab[:, channel] > midpoint).astype(np.int32).reshape(-1, 1)
+    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_MAX_ITER, 30, 0.05)
+    _, labels, centers = cv2.kmeans(
+        lab, 2, labels, criteria, 1, cv2.KMEANS_USE_INITIAL_LABELS,
+    )
+    counts = np.bincount(labels.ravel(), minlength=2)
+    return centers[counts * 10 >= len(lab)]
+
+
+def matching_sample_pixels(image: np.ndarray, centers: np.ndarray, tolerance: int) -> np.ndarray:
+    """筛选与任一取样中心的 Lab 欧氏色差在阈值内的像素。"""
+    lab = _to_lab(image)
+    matches = np.zeros(image.shape[:2], dtype=bool)
+    for center in centers:
+        distance_squared = np.sum((lab - center) ** 2, axis=2)
+        matches |= distance_squared <= tolerance ** 2
+    return matches
+
+
+def largest_connected_region(candidates: np.ndarray) -> np.ndarray | None:
+    """按像素数选出最大的四连通区域，忽略孤立单像素。"""
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(
+        candidates.astype(np.uint8), connectivity=4,
+    )
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    if not areas.size:
+        return None
+    index = int(areas.argmax())
+    if areas[index] <= 1:
+        return None
+    return labels == index + 1
+
+
+def fill_enclosed_holes(component: np.ndarray) -> np.ndarray:
+    """填实连通区域内的空洞，保留与外部相通的凹口。"""
+    padded = cv2.copyMakeBorder(
+        component.astype(np.uint8), 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0,
+    )
+    # 从图像外侧标记背景，对角方向上的开口也与外部相通。
+    cv2.floodFill(padded, None, (0, 0), 2, flags=8)
+    return padded[1:-1, 1:-1] != 2
 
 
 def _seed_component(binary: np.ndarray, x: int, y: int, connectivity: int) -> np.ndarray:

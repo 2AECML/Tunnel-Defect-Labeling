@@ -2,8 +2,11 @@ import os
 
 import cv2
 import numpy as np
+import pytest
 
-from core.similarity_fill import apply_similarity_fill, similar_connected_region
+from core.similarity_fill import (
+    apply_similarity_fill, matching_sample_pixels, sample_lab_centers, similar_connected_region,
+)
 
 
 def _image():
@@ -351,3 +354,200 @@ def test_ui_clicking_existing_polygon_repairs_holes_and_can_be_undone():
         window.state.mark_saved()
         window.deleteLater()
         app.processEvents()
+
+
+def test_sample_fill_uses_largest_new_component_in_rectangular_and_freehand_ranges(
+    qtbot, monkeypatch, tmp_path,
+):
+    from PyQt5.QtCore import QPointF, QSettings, Qt
+    from PyQt5.QtGui import QMouseEvent
+    from PyQt5.QtWidgets import QApplication
+
+    from ui import main_window
+
+    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat)
+    monkeypatch.setattr(main_window, "QSettings", lambda *args: settings)
+    window = main_window.MainWindow()
+    qtbot.addWidget(window, before_close_func=lambda widget: widget.state.mark_saved())
+    image = np.full((40, 40, 3), 220, dtype=np.uint8)
+    dark = (40, 40, 40)
+    warm = (20, 100, 180)
+    image[2:4, 2:6:2] = image[4:6, 2] = dark
+    image[2:4, 3:6:2] = image[4:6, 3] = warm
+    image[10:13, 12:16] = dark
+    image[10, 12] = warm  # 最大区域内包含两种代表色。
+    image[11, 13] = (30, 70, 110)  # 介于两色之间，但超出两个中心的阈值。
+    image[9, 13] = dark  # 与最大区域相邻，但在框外。
+    image[13, 16] = warm  # 仅在对角处接触另一候选像素。
+    image[28:30, 26:29] = warm
+    image[33:37, 33:37] = warm  # 位于面状选区的凹口内。
+    image[21:25, 20:25] = dark
+    image[18, 21] = warm
+    original_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    original_mask[10:13, 14] = 2  # 已有同类标注隔开左右两片候选像素。
+    original_mask[11, 15] = 3
+    original_mask[18, 21] = 3
+    original_mask[21:25, 20:25] = 2
+    original_mask[23, 22] = 0  # 大片已有标注仅剩一个符合阈值的空白像素。
+    window.state.load_image_and_mask(image, original_mask.copy())
+    window.show()
+    window.btn_edit.click()
+    window._refresh_display(reset_zoom=True)
+    panel = window.edit_panel
+    panel.btn_sample_fill.click()
+    panel.set_class_index(1)
+    panel.slider_similarity.spin_value.setValue(1)
+    QApplication.processEvents()
+    view = window.viewer
+    view.resetTransform()
+    view.scale(4, 4)
+
+    def mouse(kind, x, y):
+        position = view.mapFromScene(QPointF(x + 0.5, y + 0.5))
+        button = Qt.NoButton if kind == QMouseEvent.MouseMove else Qt.LeftButton
+        buttons = Qt.NoButton if kind == QMouseEvent.MouseButtonRelease else Qt.LeftButton
+        event = QMouseEvent(kind, QPointF(position), button, buttons, Qt.NoModifier)
+        QApplication.sendEvent(view.viewport(), event)
+
+    mouse(QMouseEvent.MouseButtonPress, 2, 2)
+    for x, y in [(5, 2), (5, 3), (3, 3), (3, 5)]:
+        mouse(QMouseEvent.MouseMove, x, y)
+    assert view.stroke_item.path().elementCount() == 5
+    assert view.stroke_item.brush().style() == Qt.NoBrush
+    mouse(QMouseEvent.MouseButtonRelease, 2, 5)
+    expected_centers = cv2.cvtColor(np.array([[dark, warm]], np.float32) / 255, cv2.COLOR_BGR2Lab)[0]
+    centers = window.state.fill_sample
+    np.testing.assert_allclose(centers[np.argsort(centers[:, 0])], expected_centers, atol=0.001)
+    assert panel.btn_resample.isEnabled()
+    assert not window.state.is_dirty and not window.state.can_undo()
+
+    mouse(QMouseEvent.MouseButtonPress, 27, 29)
+    mouse(QMouseEvent.MouseMove, 12, 10)
+    assert view.stroke_item.isVisible()
+    assert view.stroke_item.path().contains(QPointF(18, 18))
+    np.testing.assert_array_equal(window.state.mask_img, original_mask)
+    mouse(QMouseEvent.MouseButtonRelease, 12, 10)
+    assert not view.stroke_item.isVisible()
+    expected = original_mask.copy()
+    expected[10:13, 12:14] = 2
+    expected[11, 13] = 0
+    np.testing.assert_array_equal(window.state.mask_img, expected)
+    assert len(window.state.undo_stack) == 1
+
+    panel.btn_undo.click()
+    np.testing.assert_array_equal(window.state.mask_img, original_mask)
+    mouse(QMouseEvent.MouseButtonPress, 16, 13)
+    mouse(QMouseEvent.MouseButtonRelease, 22, 20)
+    np.testing.assert_array_equal(window.state.mask_img, original_mask)
+    assert not window.state.is_dirty and window.state.can_redo()
+    panel.btn_redo.click()
+    np.testing.assert_array_equal(window.state.mask_img, expected)
+
+    mouse(QMouseEvent.MouseButtonPress, 27, 29)
+    mouse(QMouseEvent.MouseButtonRelease, 12, 10)
+    expected[28:30, 26:28] = 2
+    np.testing.assert_array_equal(window.state.mask_img, expected)
+    assert len(window.state.undo_stack) == 2
+
+    mouse(QMouseEvent.MouseButtonPress, 25, 27)
+    mouse(QMouseEvent.MouseMove, 37, 37)
+    panel.combo_fill_range.setCurrentIndex(1)
+    assert not window.engine.is_active and not view.stroke_item.isVisible()
+    mouse(QMouseEvent.MouseButtonRelease, 37, 37)
+    np.testing.assert_array_equal(window.state.mask_img, expected)
+    np.testing.assert_array_equal(window.state.fill_sample, centers)
+
+    mouse(QMouseEvent.MouseButtonPress, 25, 27)
+    for x, y in [(37, 27), (37, 30), (30, 30), (30, 37)]:
+        mouse(QMouseEvent.MouseMove, x, y)
+    assert view.stroke_item.path().elementCount() == 5
+    assert view.stroke_item.brush().style() == Qt.NoBrush
+    np.testing.assert_array_equal(window.state.mask_img, expected)
+    mouse(QMouseEvent.MouseButtonRelease, 25, 37)
+    expected[28:30, 28] = 2
+    np.testing.assert_array_equal(window.state.mask_img, expected)
+    panel.btn_resample.click()
+    assert window.state.fill_sample is None and not panel.btn_resample.isEnabled()
+    np.testing.assert_array_equal(window.state.mask_img, expected)
+
+
+def test_sample_fill_clips_ranges_and_resets_sample_when_loading_an_image():
+    from core.annotation_state import AnnotationState
+    from core.config import DrawTool
+    from core.draw_engine import DrawEngine
+
+    state = AnnotationState()
+    image = np.full((4, 6, 3), 20, dtype=np.uint8)
+    state.load_image_and_mask(image, None)
+    state.tool = DrawTool.SAMPLE_FILL
+    state.sample_fill_tolerance = 0
+    engine = DrawEngine(state)
+    engine.on_press(5, 3)
+    engine.on_release(5, 3)
+    assert state.fill_sample is None
+    engine.on_press(5, 3)
+    engine.on_move(6, 2)
+    engine.on_release(7, 1)
+    assert state.fill_sample is None
+    engine.on_press(5, 3)
+    engine.on_move(9, 2)
+    engine.on_release(5, 1)
+    assert state.fill_sample is not None
+    engine.on_press(1, 1)
+    assert engine.on_release(-2, -2) == 4
+    assert np.all(state.mask_img[:2, :2] == state.current_draw_value)
+    assert np.count_nonzero(state.mask_img) == 4
+    state.load_image_and_mask(image.copy(), None)
+    assert state.fill_sample is None
+
+
+@pytest.mark.parametrize("freehand", [False, True], ids=["rectangle", "freehand"])
+def test_sample_fill_fills_only_enclosed_background_in_the_largest_region(freehand):
+    from core.annotation_state import AnnotationState
+    from core.config import DrawTool
+    from core.draw_engine import DrawEngine
+
+    image = np.full((20, 24, 3), 200, dtype=np.uint8)
+    image[3:14, 3:16] = 50
+    image[6:10, 6:10] = 200  # 完全封闭、色差超出阈值。
+    image[3:8, 12] = 200  # 与外部相通的凹口。
+    image[3, 3] = image[4, 4] = 200  # 对角方向相通。
+    image[15:18, 17:20] = 50  # 面积较小的独立区域。
+    mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    mask[7, 7] = mask[3, 12] = 3
+    state = AnnotationState()
+    state.load_image_and_mask(image, mask.copy())
+    state.tool = DrawTool.SAMPLE_FILL
+    state.fill_freehand = freehand
+    state.fill_sample = sample_lab_centers(image[3, 4:5])
+    state.sample_fill_tolerance = 0
+
+    engine = DrawEngine(state)
+    engine.on_press(1, 1)
+    if freehand:
+        for x, y in [(22, 1), (22, 12), (20, 12), (20, 19)]:
+            engine.on_move(x, y)
+        count = engine.on_release(1, 19)
+    else:
+        count = engine.on_release(22, 19)
+
+    expected = mask.copy()
+    expected[3:14, 3:16] = state.current_draw_value
+    expected[3:8, 12] = 0
+    expected[3, 3] = expected[4, 4] = 0
+    expected[mask != 0] = mask[mask != 0]
+    assert count == np.count_nonzero(expected != mask)
+    np.testing.assert_array_equal(state.mask_img, expected)
+    assert state.pop_undo() and not state.can_undo()
+    np.testing.assert_array_equal(state.mask_img, mask)
+    assert state.pop_redo()
+    np.testing.assert_array_equal(state.mask_img, expected)
+
+
+def test_sample_lab_centers_discards_a_rare_color_cluster():
+    pixels = np.array([(50, 50, 50)] * 19 + [(20, 100, 180)], dtype=np.uint8)
+    centers = sample_lab_centers(pixels)
+    assert centers.shape == (1, 3)
+    matches = matching_sample_pixels(pixels[None, :, :], centers, tolerance=1)
+    assert matches[0, :-1].all()
+    assert not matches[0, -1]

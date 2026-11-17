@@ -27,8 +27,15 @@ class DrawTool:
     LINE   = "line"    # 线状笔（裂缝专用，描边不填充）
     POLY   = "poly"    # 面状笔（fillPoly）
     ERASER = "eraser"  # 橡皮擦
+    RECT_ERASER = "rect_eraser"  # 拖拽矩形区域擦除
+    POLY_ERASER = "poly_eraser"  # 沿边界拖动、闭合后擦除内部
     EDIT_POLY = "edit_poly"  # 从现有栅格掩膜重建并编辑多边形
     AUTO_FILL = "auto_fill"  # 按原图像素相似度填充连通区域
+    SAMPLE_FILL = "sample_fill"  # 按取样的 Lab 颜色中心填充最大连通区域
+
+    AREA_ERASERS = (RECT_ERASER, POLY_ERASER)
+    ERASERS = (ERASER, RECT_ERASER, POLY_ERASER)
+    RECTANGLE_TOOLS = (RECT_ERASER, SAMPLE_FILL)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 应用全局设置
@@ -39,5 +46,6 @@ DEFAULT_BRUSH_LINE   = 3    # 线状笔默认宽度（像素）
 DEFAULT_BRUSH_POLY   = 1    # 面状笔默认宽度
 DEFAULT_BRUSH_ERASER = 20   # 橡皮擦默认宽度
 DEFAULT_FILL_TOLERANCE = 20  # 自动填充：相对种子像素的单通道色差阈值
+DEFAULT_SAMPLE_FILL_TOLERANCE = 8  # 取样填充：与最近 Lab 颜色中心的距离阈值
 
 VALID_IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff')
