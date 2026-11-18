@@ -20,7 +20,7 @@ from core.config import (
 from ui.class_manager_dialog import ClassManagerDialog
 from ui.theme import THEMES, build_panel_style
 from ui.styled_controls import ThemedComboBox, ThemedSpinBox
-from ui.shortcuts import action_shortcut_text
+from ui.shortcuts import TOOL_SHORTCUTS, action_shortcut_text
 
 
 # ── 带标签滑块 ────────────────────────────────────────────────────────────────
@@ -158,6 +158,13 @@ class EditPanel(QWidget):
         self.btn_sample_fill.setObjectName("toolBtn")
         self.btn_sample_fill.setCheckable(True)
         self.btn_sample_fill.setFixedHeight(38)
+        self._shortcut_tool_buttons = {
+            DrawTool.LINE: self.btn_line,
+            DrawTool.POLY: self.btn_poly,
+            DrawTool.ERASER: self.btn_eraser,
+            DrawTool.AUTO_FILL: self.btn_auto_fill,
+            DrawTool.SAMPLE_FILL: self.btn_sample_fill,
+        }
         grp = QButtonGroup(self)
         for b in (
             self.btn_line, self.btn_poly, self.btn_eraser,
@@ -540,6 +547,11 @@ class EditPanel(QWidget):
     def set_redo_enabled(self, v):
         self.btn_redo.setEnabled(v)
 
+    def trigger_tool_shortcut(self, action):
+        button = self._shortcut_tool_buttons.get(action)
+        if button is not None:
+            button.click()
+
     def update_shortcuts(self, bindings):
         def key(action):
             return action_shortcut_text(bindings, action)
@@ -555,6 +567,9 @@ class EditPanel(QWidget):
             hint = compact(button, key(action), 74)
             button.setText(f"{label}\n{hint}")
             button.setToolTip(f"{label} ({key(action)})")
+        for item in TOOL_SHORTCUTS:
+            self._shortcut_tool_buttons[item.action].setToolTip(
+                f"{item.label} ({key(item.action)})")
         self.lbl_auto_fill_hint.setText(
             "单击原图中的一点，自动填充与该点颜色相近且相连的区域。"
             "自动连接 1–2 像素细缝并填满内部空洞。"

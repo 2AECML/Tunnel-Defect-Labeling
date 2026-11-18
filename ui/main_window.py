@@ -1484,6 +1484,8 @@ class MainWindow(QMainWindow):
         }
         if action in callbacks:
             callbacks[action]()
+        elif self.edit_panel and self.edit_panel.isVisible():
+            self.edit_panel.trigger_tool_shortcut(action)
 
     def closeEvent(self, event):
         if not self._confirm_save_if_dirty():

@@ -10,6 +10,8 @@ from PyQt5.QtWidgets import (
     QLineEdit, QPlainTextEdit, QTextEdit, QWidget,
 )
 
+from core.config import DrawTool
+
 
 @dataclass(frozen=True)
 class Shortcut:
@@ -19,6 +21,13 @@ class Shortcut:
     action: str
 
 
+TOOL_SHORTCUTS = (
+    Shortcut(DrawTool.LINE, "线状笔", "1", DrawTool.LINE),
+    Shortcut(DrawTool.POLY, "面状笔", "2", DrawTool.POLY),
+    Shortcut(DrawTool.ERASER, "橡皮擦", "E", DrawTool.ERASER),
+    Shortcut(DrawTool.AUTO_FILL, "相似像素自动填充", "3", DrawTool.AUTO_FILL),
+    Shortcut(DrawTool.SAMPLE_FILL, "取样框选填充", "4", DrawTool.SAMPLE_FILL),
+)
 SHORTCUTS = (
     Shortcut("previous", "上一张", "A", "previous"),
     Shortcut("next", "下一张", "D", "next"),
@@ -26,7 +35,7 @@ SHORTCUTS = (
     Shortcut("redo", "重做（恢复撤销）", "Ctrl+Y", "redo"),
     Shortcut("save", "保存掩膜", "Ctrl+S", "save"),
     Shortcut("overlay", "掩膜叠加", "C", "overlay"),
-)
+) + TOOL_SHORTCUTS
 DEFAULT_SHORTCUTS = {item.name: item.default for item in SHORTCUTS}
 MODIFIER_MASK = int(Qt.KeyboardModifierMask)
 MODIFIER_KEYS = (Qt.Key_Control, Qt.Key_Shift, Qt.Key_Alt, Qt.Key_Meta)
@@ -71,21 +80,31 @@ def shortcut_errors(bindings):
 def load_shortcuts(settings):
     bindings = dict(DEFAULT_SHORTCUTS)
     raw = settings.value("shortcuts", "", type=str)
+    saved = {}
     if raw:
         try:
             saved = json.loads(raw)
-            if not isinstance(saved, dict) or any(not isinstance(v, str) for v in saved.values()):
-                return bindings
-            # 旧版的 32 项配置不再适用，不恢复已移除的快捷键。
-            if set(saved) - set(bindings):
-                return bindings
-            bindings.update({k: v for k, v in saved.items() if k in bindings})
-            if "overlay" not in saved:
-                bindings["overlay"] = settings.value("mask_shortcut", "C", type=str)
         except (ValueError, TypeError):
-            return dict(DEFAULT_SHORTCUTS)
-    else:
-        bindings["overlay"] = settings.value("mask_shortcut", "C", type=str)
+            return bindings
+        if not isinstance(saved, dict) or any(not isinstance(value, str) for value in saved.values()):
+            return bindings
+        # 旧版的 32 项配置不再适用，不恢复已移除的快捷键。
+        if set(saved) - set(bindings):
+            return bindings
+    if "overlay" not in saved:
+        saved["overlay"] = settings.value("mask_shortcut", DEFAULT_SHORTCUTS["overlay"], type=str)
+    bindings.update(saved)
+    used = {normalize_shortcut(value) for value in bindings.values()}
+    saved_keys = {normalize_shortcut(value) for value in saved.values()}
+    for item in TOOL_SHORTCUTS:
+        if item.name not in saved and item.default in saved_keys:
+            for prefix in ("Ctrl+", "Alt+", "Shift+", "Ctrl+Alt+", "Ctrl+Shift+",
+                           "Alt+Shift+", "Ctrl+Alt+Shift+"):
+                candidate = normalize_shortcut(prefix + item.default)
+                if candidate not in used:
+                    bindings[item.name] = candidate
+                    used.add(candidate)
+                    break
     if shortcut_errors(bindings):
         return dict(DEFAULT_SHORTCUTS)
     return {key: normalize_shortcut(value) for key, value in bindings.items()}
@@ -103,7 +122,7 @@ def shortcut_action(bindings, event):
 
 
 class ShortcutController(QObject):
-    """响应五项常用快捷键；掩膜叠加由原有控制器处理长按状态。"""
+    """响应常用操作及编辑工具快捷键；掩膜叠加由原有控制器处理长按状态。"""
 
     def __init__(self, window):
         super().__init__(window)

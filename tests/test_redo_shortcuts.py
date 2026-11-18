@@ -179,6 +179,44 @@ def test_every_shortcut_can_be_changed_and_individually_reset(qtbot, item):
     assert dialog.validate_shortcuts()
 
 
+def test_default_tool_keys_select_tools_only_in_edit_mode(windows, qtbot):
+    create, settings = windows
+    settings.setValue("eraser_tool", DrawTool.RECT_ERASER)
+    window = create()
+    window.state.load_image_and_mask(np.zeros((32, 32, 3), np.uint8), None)
+    qtbot.keyClick(window.viewer, Qt.Key_2)
+    assert window.state.tool == DrawTool.LINE
+    assert not window.btn_edit.isChecked()
+
+    window.btn_edit.click()
+    panel = window.edit_panel
+    window.activateWindow()
+    window.viewer.setFocus()
+    QApplication.processEvents()
+    for key, tool, button in (
+        (Qt.Key_2, DrawTool.POLY, panel.btn_poly),
+        (Qt.Key_E, DrawTool.RECT_ERASER, panel.btn_eraser),
+        (Qt.Key_3, DrawTool.AUTO_FILL, panel.btn_auto_fill),
+        (Qt.Key_4, DrawTool.SAMPLE_FILL, panel.btn_sample_fill),
+    ):
+        qtbot.keyClick(window.viewer, key)
+        assert window.state.tool == tool
+        assert button.isChecked()
+
+    panel.activateWindow()
+    panel.btn_sample_fill.setFocus()
+    QApplication.processEvents()
+    qtbot.keyClick(panel.btn_sample_fill, Qt.Key_1)
+    assert window.state.tool == DrawTool.LINE
+    assert panel.btn_line.isChecked()
+    assert not window.state.mask_img.any()
+    assert not window.state.can_undo()
+
+    window.btn_edit.click()
+    qtbot.keyClick(window.viewer, Qt.Key_4)
+    assert window.state.tool == DrawTool.LINE
+
+
 @pytest.mark.parametrize("item", [item for item in SHORTCUTS if item.name != "overlay"],
                          ids=lambda item: item.name)
 def test_rebound_shortcuts_use_exact_modifiers_and_old_key_stops(windows, qtbot, monkeypatch, item):
@@ -239,6 +277,7 @@ def test_all_shortcuts_persist_together_only_on_settings_save(windows, qtbot, ac
         assert expected["previous"] in restored.btn_prev.toolTip()
         restored.btn_edit.click()
         assert expected["redo"] in restored.edit_panel.btn_redo.toolTip()
+        assert expected[DrawTool.SAMPLE_FILL] in restored.edit_panel.btn_sample_fill.toolTip()
 
 
 def test_shortcuts_work_from_panel_and_do_not_intercept_inputs_or_dialogs(windows, qtbot, monkeypatch):
@@ -258,9 +297,9 @@ def test_shortcuts_work_from_panel_and_do_not_intercept_inputs_or_dialogs(window
     text = QLineEdit(panel)
     text.show()
     text.setFocus()
-    qtbot.keyClicks(text, "12345ad")
+    qtbot.keyClicks(text, "12345ade")
     qtbot.keyClick(text, Qt.Key_Y, Qt.ControlModifier)
-    assert text.text() == "12345ad"
+    assert text.text() == "12345ade"
     assert not calls
     dialog = SettingsDialog(parent=window)
     qtbot.addWidget(dialog)
@@ -292,21 +331,18 @@ def test_old_profiles_do_not_restore_removed_shortcuts(windows, qtbot, monkeypat
     settings.setValue("mask_shortcut", "Ctrl+K")
     settings.setValue("mask_shortcut_mode", "hold")
     window = create()
-    assert window.shortcuts == {
-        "previous": "A", "next": "D", "undo": "Ctrl+Z", "redo": "Ctrl+Y", "save": "Ctrl+S",
-        "overlay": "C",
-    }
+    assert window.shortcuts == DEFAULT_SHORTCUTS
     dialog = SettingsDialog(shortcuts=window.shortcuts)
     qtbot.addWidget(dialog)
     assert set(dialog.shortcut_editors) == set(window.shortcuts)
-    assert len(dialog.shortcut_editors) == 6
+    assert len(dialog.shortcut_editors) == 11
     window.btn_edit.click()
     window.activateWindow()
     window.viewer.setFocus()
     QApplication.processEvents()
     calls = []
     monkeypatch.setattr(window, "_trigger_shortcut", calls.append)
-    removed = ("Left", "Right", "E", "F", "0", "1", "2", "3", "4", "5",
+    removed = ("Left", "Right", "F", "0", "5",
                "[", "]", "Return", "Enter", "Esc", "Ctrl+D", "Del",
                *(f"Alt+{i}" for i in range(1, 10)))
     for text in removed:
@@ -354,5 +390,14 @@ def test_restoring_overlay_keeps_saved_five_shortcuts(windows):
              "redo": "Ctrl+R", "save": "Ctrl+Shift+S"}
     settings.setValue("shortcuts", json.dumps(saved))
     window = create()
-    assert window.shortcuts == {**saved, "overlay": "C"}
+    assert window.shortcuts == {**DEFAULT_SHORTCUTS, **saved}
     assert window.mask_shortcut_mode == "hold"
+
+
+def test_new_tool_defaults_do_not_replace_saved_shortcuts(windows):
+    create, settings = windows
+    saved = {"previous": "3", "next": "Ctrl+3", "overlay": "E", "undo": "Ctrl+U"}
+    settings.setValue("shortcuts", json.dumps(saved))
+    assert create().shortcuts == {
+        **DEFAULT_SHORTCUTS, **saved, DrawTool.AUTO_FILL: "Alt+3", DrawTool.ERASER: "Ctrl+E",
+    }
